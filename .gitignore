@@ -1,0 +1,15 @@
+# OS / editor cruft
+.DS_Store
+__pycache__/
+*.pyc
+
+# Generated per-run outputs -- never commit personal recordings or renders
+*_fieldaudio/
+*.tmp.*
+
+# Raw/rendered audio & video artifacts -- this repo is code + recipes, not media
+*.wav
+*.wave
+*.mp4
+*.mov
+*.aiff

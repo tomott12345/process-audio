@@ -1,0 +1,67 @@
+{
+  "$comment": "Per-label recipes for process_field_wav.py. Add a new content type by adding an entry here -- the script fails loudly (refuses to run) if a label is missing a required key instead of silently reusing another label's EQ. EQ chains and loudness targets are starting points; recipes flagged \"untested\": true haven't been validated against real takes yet -- A/B them before trusting them unattended.",
+  "places": ["porch", "window", "woods", "street", "brook", "lake", "waterfall", "unknown"],
+  "denoise_chain": "afftdn=nr=8:nf=-50:tn=1",
+  "repair_chain": "adeclick=window=55:overlap=75,adeclip",
+  "clean_run_detector": {
+    "baseline_percentile": 20,
+    "rumble_factor": 3.0,
+    "thump_factor": 3.0,
+    "mid_factor": 3.0,
+    "rms_factor": 2.5,
+    "peak_factor": 6.0,
+    "peak_clip_ceiling": 0.97
+  },
+  "labels": {
+    "rain": {
+      "eq": "highpass=f=30:poles=2,lowpass=f=14000:poles=2,equalizer=f=80:t=q:w=0.8:g=1.5,equalizer=f=280:t=q:w=1.0:g=-2.5,equalizer=f=3500:t=q:w=1.1:g=1.5,equalizer=f=8500:t=q:w=1.4:g=-2",
+      "bed_selection": "longest",
+      "correlated_water": true,
+      "targets": {"long": [-18, -1.5, 16], "short": [-14, -1.5, 11]}
+    },
+    "thunder": {
+      "eq": "highpass=f=30:poles=2,equalizer=f=280:t=q:w=1.0:g=-2,equalizer=f=3500:t=q:w=1.1:g=1.5",
+      "bed_selection": "longest",
+      "correlated_water": true,
+      "targets": {"long": [-18, -1.5, 16], "short": [-14, -1.5, 11]}
+    },
+    "insects": {
+      "eq": "highpass=f=180:poles=2,lowpass=f=13500:poles=2,equalizer=f=280:t=q:w=1.0:g=-3,equalizer=f=1400:t=q:w=1.1:g=-1.5,equalizer=f=4000:t=q:w=1.0:g=2,equalizer=f=6500:t=q:w=1.2:g=2.5,equalizer=f=11000:t=q:w=1.5:g=-2",
+      "bed_selection": "activity",
+      "correlated_water": false,
+      "targets": {"long": [-14, -1.5, 11], "short": [-14, -1.5, 11]}
+    },
+    "mixed": {
+      "eq": "highpass=f=30:poles=2,lowpass=f=14000:poles=2,equalizer=f=80:t=q:w=0.8:g=1.5,equalizer=f=280:t=q:w=1.0:g=-2.5,equalizer=f=3500:t=q:w=1.1:g=1.5,equalizer=f=8500:t=q:w=1.4:g=-2",
+      "bed_selection": "mixed",
+      "correlated_water": true,
+      "targets": {"long": [-18, -1.5, 16], "short": [-14, -1.5, 11]}
+    },
+    "water": {
+      "eq": "highpass=f=30:poles=2,lowpass=f=14000:poles=2,equalizer=f=80:t=q:w=0.8:g=1.5,equalizer=f=280:t=q:w=1.0:g=-2.5,equalizer=f=3500:t=q:w=1.1:g=1.5,equalizer=f=8500:t=q:w=1.4:g=-2",
+      "bed_selection": "longest",
+      "correlated_water": true,
+      "targets": {"long": [-18, -1.5, 16], "short": [-14, -1.5, 11]}
+    },
+    "brook": {
+      "eq": "highpass=f=30:poles=2,lowpass=f=14000:poles=2,equalizer=f=80:t=q:w=0.8:g=1.5,equalizer=f=280:t=q:w=1.0:g=-2.5,equalizer=f=3500:t=q:w=1.1:g=1.5,equalizer=f=8500:t=q:w=1.4:g=-2",
+      "bed_selection": "longest",
+      "correlated_water": true,
+      "targets": {"long": [-18, -1.5, 16], "short": [-14, -1.5, 11]}
+    },
+    "birds": {
+      "eq": "highpass=f=100:poles=2,lowpass=f=15000:poles=2,equalizer=f=300:t=q:w=1.0:g=-1.5,equalizer=f=3000:t=q:w=1.0:g=1.0,equalizer=f=6000:t=q:w=1.2:g=1.0,equalizer=f=10000:t=q:w=1.4:g=-1.0",
+      "bed_selection": "activity",
+      "correlated_water": false,
+      "targets": {"long": [-14, -1.5, 11], "short": [-14, -1.5, 11]},
+      "untested": true
+    },
+    "waterfall": {
+      "eq": "highpass=f=40:poles=2,lowpass=f=13000:poles=2,equalizer=f=100:t=q:w=0.8:g=-1.0,equalizer=f=300:t=q:w=1.0:g=-3.0,equalizer=f=1200:t=q:w=1.0:g=-1.0,equalizer=f=7000:t=q:w=1.3:g=1.5,equalizer=f=10500:t=q:w=1.4:g=-2.0",
+      "bed_selection": "longest",
+      "correlated_water": false,
+      "targets": {"long": [-18, -1.5, 16], "short": [-14, -1.5, 11]},
+      "untested": true
+    }
+  }
+}
