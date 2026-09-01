@@ -5,6 +5,7 @@ Usage:
   process_field_wav.py INPUT.wav --label rain --place porch
   process_field_wav.py INPUT.wav --label insects --place woods --long clean
   process_field_wav.py INPUT.wav --label thunder --start 12 --end 240
+  process_field_wav.py INPUT.wav --label thunder --start 5 --end 3:45
   process_field_wav.py INPUT.wav --label birds --place woods --plan-only
 
 Does not delete the source. Stays pcm_s24le until optional AAC mux.
@@ -462,6 +463,28 @@ Re-run with flags, for example:
     )
 
 
+def parse_timestamp(value: str) -> float:
+    """Accept plain seconds ("5", "12.5") for --start, or a clock-style
+    timestamp ("3:45" = 3m45s, "1:02:30" = 1h2m30s) for --end -- either flag
+    takes either format. Used as the argparse `type=` for --start/--end."""
+    value = value.strip()
+    parts = value.split(":") if ":" in value else [value]
+    if len(parts) not in (1, 2, 3):
+        raise argparse.ArgumentTypeError(
+            f"not a valid time: {value!r} (use seconds like 12.5, or mm:ss / hh:mm:ss)"
+        )
+    try:
+        parts_f = [float(p) for p in parts]
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"not a valid time: {value!r} (use seconds like 12.5, or mm:ss / hh:mm:ss)"
+        )
+    seconds = 0.0
+    for p in parts_f:
+        seconds = seconds * 60 + p
+    return seconds
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Clean a field WAV into long + 3-minute Short masters."
@@ -488,8 +511,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="clean",
         help="full = usable file after start trim; clean = best bed only",
     )
-    p.add_argument("--start", type=float, help="Override bed start seconds")
-    p.add_argument("--end", type=float, help="Override bed end seconds")
+    p.add_argument(
+        "--start",
+        type=parse_timestamp,
+        help="Seconds to trim from the beginning (e.g. 5), or an mm:ss / hh:mm:ss "
+        "timestamp for the bed's start",
+    )
+    p.add_argument(
+        "--end",
+        type=parse_timestamp,
+        help="Where to cut off the bed -- seconds, or an mm:ss / hh:mm:ss timestamp "
+        "(e.g. 3:45 or 1:02:30)",
+    )
     p.add_argument("--out-dir", type=Path, help="Output folder (default: <stem>_fieldaudio/)")
     p.add_argument("--denoise", action="store_true", help="Optional afftdn nr=8 only")
     p.add_argument("--repair", action="store_true", help="adeclick + adeclip before EQ")

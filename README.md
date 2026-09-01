@@ -25,6 +25,12 @@ message (and an install hint) if anything is missing.
 ./process_field_wav.sh take.wav --label rain --place porch --long clean
 ```
 
+`--start`/`--end` override the automatic bed selection. `--start` is seconds to trim from the beginning (e.g. `5`); `--end` takes either seconds or an `mm:ss` / `hh:mm:ss` timestamp to cut off at:
+
+```bash
+./process_field_wav.sh take.wav --label thunder --place porch --start 5 --end 3:45
+```
+
 If you skip `--label`/`--place` (or pass `--ask`), it prints the questions it
 needs answered instead of guessing:
 
