@@ -355,6 +355,65 @@ def copy_trim(src: Path, dst: Path, start: float, end: float) -> None:
     _ffmpeg_to(cmd, tmp, dst)
 
 
+def _crossfade_two(x: Path, y: Path, dst: Path, d: float) -> None:
+    """Concatenate x then y with a d-second equal-power-ish (tri) crossfade
+    at the join. Both inputs must already share sample rate/channel count."""
+    tmp = dst.with_suffix(".tmp.wav")
+    cmd = [
+        "ffmpeg", "-hide_banner", "-y",
+        "-i", str(x), "-i", str(y),
+        "-filter_complex", f"[0:a][1:a]acrossfade=d={d:.3f}:c1=tri:c2=tri[out]",
+        "-map", "[out]", "-ar", "48000", "-ac", "2", "-c:a", "pcm_s24le", str(tmp),
+    ]
+    _ffmpeg_to(cmd, tmp, dst)
+
+
+def splice_span_back(full_path: Path, span_clean: Path, w0: float, w1: float, dst: Path, *, xfade: float = 0.1) -> None:
+    """Replace [w0, w1) of full_path with span_clean (which must be exactly
+    w1-w0 seconds), crossfading a short `xfade` at whichever of the two
+    boundaries actually exist -- neither, if the window covers the whole
+    file; only the trailing one, if w1 reaches the file's end; only the
+    leading one, if w0 is the file's start; otherwise both. Everything
+    outside [w0, w1) is passed through untouched apart from that brief
+    crossfade region."""
+    dur = duration_seconds(full_path)
+    at_start = w0 <= 1e-3
+    at_end = (dur - w1) <= 1e-3
+    xf = xfade
+    if not at_start:
+        xf = min(xf, w0)
+    if not at_end:
+        xf = min(xf, dur - w1)
+    xf = max(0.01, xf)
+
+    cur = span_clean
+    tmp_a = tmp_c = tmp_ab = None
+    try:
+        if not at_start:
+            tmp_a = dst.with_name(dst.stem + "_a.tmp.wav")
+            copy_trim(full_path, tmp_a, 0.0, w0 + xf)
+            tmp_ab = dst.with_name(dst.stem + "_ab.tmp.wav")
+            _crossfade_two(tmp_a, cur, tmp_ab, xf)
+            cur = tmp_ab
+        if not at_end:
+            tmp_c = dst.with_name(dst.stem + "_c.tmp.wav")
+            copy_trim(full_path, tmp_c, w1 - xf, dur)
+            merged = dst.with_name(dst.stem + "_abc.tmp.wav")
+            _crossfade_two(cur, tmp_c, merged, xf)
+            cur = merged
+        if cur == span_clean:
+            # window covered the entire file -- the cleaned span IS the file.
+            tmp = dst.with_suffix(".tmp.wav")
+            subprocess.check_call(["ffmpeg", "-hide_banner", "-y", "-i", str(cur), "-c", "copy", str(tmp)])
+            tmp.replace(dst)
+        else:
+            cur.replace(dst)
+    finally:
+        for tmp in (tmp_a, tmp_c, tmp_ab):
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
+
+
 def hard_splice_to_target(
     src: Path,
     dst: Path,
@@ -521,6 +580,15 @@ def parse_timestamp(value: str) -> float:
     return seconds
 
 
+
+def parse_voice_at(value: str) -> float | str:
+    """For --remove-voice-at: either a timestamp (same formats as
+    parse_timestamp) or the literal word "end" (meaning the tail of the
+    trimmed bed, wherever that ends up being)."""
+    if value.strip().lower() == "end":
+        return "end"
+    return parse_timestamp(value)
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Clean a field WAV into long + 3-minute Short masters."
@@ -610,6 +678,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--voice-model",
         default="htdemucs",
         help="Demucs model name for --remove-voice (default: htdemucs)",
+    )
+    p.add_argument(
+        "--remove-voice-at",
+        action="append",
+        type=parse_voice_at,
+        metavar="TIMESTAMP",
+        help="Scoped alternative to --remove-voice: only run Demucs on a padded window "
+        "around this moment (seconds, mm:ss/hh:mm:ss, or the literal word 'end' for the "
+        "tail of the chosen bed) -- same timeline as --start/--end, i.e. the ORIGINAL "
+        "source file, not the trimmed bed -- then splice the cleaned span back in with a "
+        "short crossfade. Everything outside the window is untouched, and it's much "
+        "faster than processing the whole file. Repeatable for multiple moments.",
+    )
+    p.add_argument(
+        "--remove-voice-pad",
+        type=float,
+        default=4.0,
+        help="Seconds of padding on each side of every --remove-voice-at timestamp "
+        "(default 4.0). Give the footstep/voice room to actually be inside the window "
+        "with clean margin at the edges for the splice.",
     )
     p.add_argument(
         "--denoise-profile-start",
@@ -762,6 +850,63 @@ def main() -> int:
         trim_path = voice_removed
         pre_eq_notes.append(f"remove_voice=yes model={args.voice_model}")
 
+    if args.remove_voice and args.remove_voice_at:
+        die("pass --remove-voice (whole file) OR --remove-voice-at (specific moments), not both")
+
+    if args.remove_voice_at and not args.plan_only:
+        preflight_voice_removal()
+        cur_dur = duration_seconds(trim_path)
+        # --remove-voice-at timestamps are in the ORIGINAL source file's
+        # timeline (same as --start/--end and whatever you'd see scrubbing
+        # the raw take in an editor) -- NOT the trimmed bed's timeline,
+        # which may already be offset from the source (e.g. --long full
+        # still drops a 2s lead-in for files over 6s). Converting here so
+        # "15" always means "15 seconds into the file you're looking at."
+        windows = []
+        for spec in args.remove_voice_at:
+            src_center = end if spec == "end" else spec
+            if not (start - 1e-6 <= src_center <= end + 1e-6):
+                die(
+                    f"--remove-voice-at {spec!r} ({src_center:.2f}s in the source) is "
+                    f"outside the chosen bed {start:.2f}-{end:.2f}s -- pass --start/--end "
+                    "to include it"
+                )
+            center = src_center - start
+            w0 = max(0.0, center - args.remove_voice_pad)
+            w1 = min(cur_dur, center + args.remove_voice_pad)
+            if w1 <= w0:
+                die(f"--remove-voice-at {spec!r} resolves to an empty window")
+            windows.append([w0, w1, [str(spec)]])
+        windows.sort(key=lambda w: w[0])
+        merged: list[list] = []
+        for w0, w1, specs in windows:
+            if merged and w0 <= merged[-1][1] + 0.5:
+                merged[-1][1] = max(merged[-1][1], w1)
+                merged[-1][2].extend(specs)
+            else:
+                merged.append([w0, w1, specs])
+
+        cleaned = trim_path
+        applied = []
+        for idx, (w0, w1, specs) in enumerate(merged):
+            span_path = out_dir / f"02c_voice_span_{idx}.wav"
+            copy_trim(cleaned, span_path, w0, w1)
+            span_clean = out_dir / f"02c_voice_span_{idx}_clean.wav"
+            cmd = [
+                "python3", str(REMOVE_FOREGROUND), str(span_path),
+                "--out", str(span_clean), "--model", args.voice_model,
+            ]
+            print(f"+ remove-voice-at [{w0:.2f}-{w1:.2f}]: {' '.join(cmd)}")
+            subprocess.check_call(cmd)
+            spliced = out_dir / f"02c_voice_spliced_{idx}.wav"
+            splice_span_back(cleaned, span_clean, w0, w1, spliced)
+            cleaned = spliced
+            applied.append(f"{'+'.join(specs)}=[{w0:.2f}-{w1:.2f}]")
+        trim_path = cleaned
+        pre_eq_notes.append(
+            f"remove_voice_at={' '.join(applied)} pad={args.remove_voice_pad} model={args.voice_model}"
+        )
+
     vd_trim = volumedetect(trim_path)
     max_vol = vd_trim["max_volume"] if vd_trim["max_volume"] is not None else -12.0
 
@@ -793,7 +938,9 @@ def main() -> int:
         if have_profile:
             print("denoise-profile: would run (skipped for --plan-only)")
         if args.remove_voice:
-            print("remove-voice: would run (skipped for --plan-only)")
+            print("remove-voice: would run on the whole bed (skipped for --plan-only)")
+        if args.remove_voice_at:
+            print(f"remove-voice-at: would run on {args.remove_voice_at} +/-{args.remove_voice_pad}s (skipped for --plan-only)")
         return 0
 
     eq_path = out_dir / "03_eq.wav"
@@ -813,8 +960,8 @@ def main() -> int:
         f"eq={chain}",
         "did_not=fake_LRA,delete_source",
     ]
-    if not args.remove_voice:
-        report.append("did_not_stem_split=true (pass --remove-voice to enable)")
+    if not args.remove_voice and not args.remove_voice_at:
+        report.append("did_not_stem_split=true (pass --remove-voice or --remove-voice-at to enable)")
     report.extend(pre_eq_notes)
     if recipe.get("untested"):
         report.append(f"untested_recipe={args.label} (A/B before trusting unattended)")

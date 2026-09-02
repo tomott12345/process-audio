@@ -213,6 +213,28 @@ pip3 install demucs --break-system-packages
 (default `htdemucs`). Can also be run standalone:
 `python3 remove_foreground.py --help`.
 
+To clean only specific moments instead of the whole bed -- footsteps at a
+known timestamp, a cough, a passing conversation -- use `--remove-voice-at`
+instead of `--remove-voice`. It only runs Demucs on a short padded window
+around each moment, then splices the cleaned span back in with a short
+crossfade; everything else in the file is left completely untouched, and
+it's much faster than processing the whole recording:
+
+```bash
+./process_field_wav.sh take.wav --label rain --place street --long full \
+  --remove-voice-at 15 --remove-voice-at end --remove-voice-pad 4
+```
+
+Repeatable for multiple moments; `end` means the tail of the chosen bed.
+Timestamps are in the same timeline as `--start`/`--end` -- the original
+source file -- not the trimmed bed, since bed selection (or `--long full`'s
+own 2s lead-trim) can already shift where the bed's t=0 actually falls
+relative to your source recording. `--remove-voice-pad` (default 4s) is
+how much padding to include on each side of the timestamp -- give the
+footsteps room to actually sit inside the window with clean margin at the
+edges for the splice. `--remove-voice` and `--remove-voice-at` are mutually
+exclusive.
+
 Both flags run against the already-trimmed bed, before EQ, and REPORT.txt
 records what ran (noise span or file used, prop_decrease, model name) so a
 month from now you can see exactly what was applied to a given master.
