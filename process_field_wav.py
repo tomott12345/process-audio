@@ -537,6 +537,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seconds of linear overlap when --loop force (default 0.012).",
     )
     p.add_argument(
+        "--loop-target",
+        type=parse_timestamp,
+        help="Extend the LONG master to this length too -- seconds, or mm:ss/hh:mm:ss "
+        "(e.g. 1:00:00 for an hour). Uses hard-splice tiling for correlated water "
+        "(rain/thunder/water/brook, or whenever --loop force) and the equal-power wrap "
+        "otherwise, same as the Short. If the clean bed is already this long or longer, "
+        "it's just trimmed to exactly this length.",
+    )
+    p.add_argument(
         "--long",
         choices=("full", "clean"),
         default="clean",
@@ -836,9 +845,65 @@ def main() -> int:
 
     long_master = None
     if not args.skip_long:
+        long_src = eq_path
         long_dur = duration_seconds(eq_path)
+        if args.loop_target is not None:
+            target = args.loop_target
+            if target <= 0:
+                die("--loop-target must be positive")
+            loop_mode = args.loop
+            if loop_mode == "auto" and args.label in CORRELATED_WATER:
+                loop_mode = "never"
+            if long_dur >= target:
+                clipped = out_dir / "03b_long_clip.wav"
+                copy_trim(eq_path, clipped, 0.0, target)
+                long_src = clipped
+                report.append(
+                    f"long_looped=no bed_already_{long_dur:.3f}s_trimmed_to_{target:.3f}s"
+                )
+            elif loop_mode == "force":
+                looped = out_dir / "03b_long_splice.wav"
+                if long_dur < 8.0:
+                    die("clean bed too short to splice the long master -- pass --start/--end")
+                max_repeats = max(10, math.ceil(target / 60))
+                interior_len, repeats = hard_splice_to_target(
+                    eq_path, looped, target=target, edge=8.0,
+                    splice=max(0.008, args.splice), max_repeats=max_repeats,
+                )
+                long_src = looped
+                report.append(
+                    f"long_looped=hard_splice interior={interior_len:.3f} repeats={repeats} "
+                    f"splice={args.splice:.3f} target={target:.3f} (tiled, no equal-power wrap)"
+                )
+            elif loop_mode == "never":
+                report.append(
+                    f"long_looped=no kept_native_{long_dur:.3f}s "
+                    f"(correlated {args.label}; equal-power wrap dips -- pass --loop force to hard-splice)"
+                )
+            else:
+                looped = out_dir / "03b_long_wrap.wav"
+                slice_start = start
+                slice_end = end
+                if (slice_end - slice_start) < 4.0:
+                    die("clean slice shorter than 4s; cannot loop the long master -- pass --start/--end")
+                subprocess.check_call(
+                    [
+                        "python3", str(LOOP), str(src),
+                        "--start", f"{slice_start:.3f}",
+                        "--end", f"{slice_end:.3f}",
+                        "--target", f"{target:.3f}",
+                        "--out", str(looped),
+                    ]
+                )
+                looped_eq = out_dir / "03b_long_wrap_eq.wav"
+                ffmpeg_wav(chain, looped, looped_eq)
+                long_src = looped_eq
+                report.append(
+                    f"long_looped=yes slice={slice_start:.3f}-{slice_end:.3f} target={target:.3f}"
+                )
+            long_dur = duration_seconds(long_src)
         fade = 4.0 if long_dur > 120 else 1.0
-        long_master = finish_master("long", eq_path, fade, fade)
+        long_master = finish_master("long", long_src, fade, fade)
         products.append(long_master)
 
     short_master = None

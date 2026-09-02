@@ -45,6 +45,23 @@ anything (handy before committing to a long render):
 ./process_field_wav.sh take.wav --label birds --place woods --plan-only
 ```
 
+Loop the long master to a specific length -- an hour, say, for a background
+video -- instead of leaving it at native bed length:
+
+```bash
+./process_field_wav.sh take.wav --label rain --place porch \
+  --loop force --loop-target 1:00:00
+```
+
+`--loop-target` accepts seconds or an `mm:ss`/`hh:mm:ss` timestamp. It reuses
+the same two loop-construction methods as the Short, resolved by `--loop`
+the same way: hard-splice tiling (short ~12ms linear splices, no audible
+dip) for correlated water content -- rain/thunder/water/brook -- or whenever
+you pass `--loop force`; the equal-power wrap otherwise. If the clean bed is
+already at or past the target length, it's just trimmed to exactly that
+length rather than extended. Loudness normalization, fades, and the limiter
+are applied once to the finished full-length file, not per repeat.
+
 Process a whole folder or a mixed-content manifest at once:
 
 ```bash
