@@ -242,7 +242,7 @@ def loudnorm_measure(path: Path, i: float, tp: float, lra: float) -> dict:
     return json.loads(match.group(0))
 
 
-def analyze(path: Path, out_log: Path) -> dict:
+def analyze(path: Path, out_log: Path, recipe: dict | None = None) -> dict:
     crd = RECIPES.get("clean_run_detector", {})
     extra = []
     for key, flag in (
@@ -256,6 +256,11 @@ def analyze(path: Path, out_log: Path) -> dict:
     ):
         if key in crd:
             extra.extend([flag, str(crd[key])])
+    activity_band = (recipe or {}).get("activity_band")
+    if activity_band:
+        if len(activity_band) != 2:
+            die(f"recipe activity_band must be [lo, hi], got {activity_band!r}")
+        extra.extend(["--activity-lo", str(activity_band[0]), "--activity-hi", str(activity_band[1])])
     proc = subprocess.run(
         ["python3", str(ANALYZE), str(path), "--json", *extra],
         check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -684,7 +689,7 @@ def main() -> int:
     vd0 = volumedetect(src)
     print(f"source max_volume={vd0['max_volume']} dB  mean={vd0['mean_volume']} dB")
 
-    analysis = analyze(src, out_dir / "01_windows.txt")
+    analysis = analyze(src, out_dir / "01_windows.txt", recipe)
     print(f"duration={analysis['dur']:.3f}s  clean_runs={len(analysis.get('clean_runs') or [])}")
 
     if args.start is not None and args.end is not None:

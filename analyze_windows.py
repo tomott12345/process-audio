@@ -95,6 +95,8 @@ def main() -> int:
     p.add_argument("--rms-factor", type=float, default=2.5)
     p.add_argument("--peak-factor", type=float, default=6.0)
     p.add_argument("--peak-clip", type=float, default=0.97, help="Absolute sample amplitude treated as digital clipping regardless of file level")
+    p.add_argument("--activity-lo", type=float, default=2500.0, help="Low edge (Hz) of the 'activity' bandpass used for activity-based bed selection (insects/birds default; override per-recipe for content whose activity sits in a different band, e.g. frogs)")
+    p.add_argument("--activity-hi", type=float, default=9000.0, help="High edge (Hz) of the 'activity' bandpass")
     args = p.parse_args()
 
     sr = args.sr
@@ -104,7 +106,7 @@ def main() -> int:
 
     sos_rumble = butter(4, 150, btype="low", fs=sr, output="sos")
     sos_thump = butter(4, 80, btype="low", fs=sr, output="sos")
-    sos_activity = butter(4, [2500, 9000], btype="band", fs=sr, output="sos")
+    sos_activity = butter(4, [args.activity_lo, args.activity_hi], btype="band", fs=sr, output="sos")
     sos_mid = butter(4, [200, 1500], btype="band", fs=sr, output="sos")
 
     rows: list[tuple[float, float, float, float, float, float, float, float]] = []

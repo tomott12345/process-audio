@@ -71,17 +71,27 @@ Process a whole folder or a mixed-content manifest at once:
 
 ## Content types
 
-`rain | thunder | insects | mixed | water | brook | birds | waterfall` --
-each with its own EQ chain, loudness targets, and bed-selection strategy in
-`recipes.json`. Add a new content type by adding an entry there; the script
-refuses to run (with a clear error) if a label is missing a required key,
-rather than silently reusing another label's recipe.
+`rain | thunder | insects | mixed | water | brook | birds | waterfall | wind |
+fire | ocean | frogs` -- each with its own EQ chain, loudness targets, and
+bed-selection strategy in `recipes.json`. Add a new content type by adding an
+entry there; the script refuses to run (with a clear error) if a label is
+missing a required key, rather than silently reusing another label's recipe.
 
-`birds` and `waterfall` are marked `"untested": true` in `recipes.json` --
-they're a reasonable starting point but haven't been validated against real
-takes yet. A/B them against a few real recordings before trusting them
-unattended, and tighten the recipe (or the `clean_run_detector` factors) as
-needed.
+`birds`, `waterfall`, `wind`, `fire`, `ocean`, and `frogs` are marked
+`"untested": true` in `recipes.json` -- they're a reasoned starting point
+(EQ bands picked for each content type's actual spectral shape, not copied
+from a neighbor) but haven't been validated against real takes yet. A/B them
+against a few real recordings before trusting them unattended, and tighten
+the recipe (or the `clean_run_detector` factors) as needed.
+
+A label's `activity_band: [lo_hz, hi_hz]` (optional; defaults to 2500-9000,
+tuned for insects/birds) controls what frequency range counts as "activity"
+for `bed_selection: activity`. `frogs` overrides this to `[300, 2500]`,
+since typical frog/toad calls sit well below cricket/cicada chirp range --
+without this override, activity-based bed selection would just find
+whatever run has the most incidental high-frequency insect energy, not the
+best frog chorus. Species vary a lot in call pitch, so treat this as a
+starting point to tune per recording, same as the EQ.
 
 ## How bed selection works
 
@@ -93,8 +103,9 @@ doesn't fail to find a usable "clean" bed just because it isn't a quiet porch
 recording. Genuine digital clipping is still flagged on an absolute basis.
 
 `process_field_wav.py` then picks a bed from the clean runs using the
-strategy in the label's recipe: the longest clean run (weather/water), the
-highest-activity run (insects/birds), or a comparison of the two (mixed).
+strategy in the label's recipe: the longest clean run (weather/water/wind/
+ocean), the highest-activity run (insects/birds/fire/frogs -- each over its
+own `activity_band`), or a comparison of the two (mixed).
 
 ## Removing unwanted noise or a voice/foreground
 
