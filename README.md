@@ -107,6 +107,44 @@ strategy in the label's recipe: the longest clean run (weather/water/wind/
 ocean), the highest-activity run (insects/birds/fire/frogs -- each over its
 own `activity_band`), or a comparison of the two (mixed).
 
+## Spoken word: interviews and podcasts
+
+`process_speech_wav.py` is a separate, standalone script for dialogue --
+interviews, panels, solo podcast episodes -- not a mode of the nature
+pipeline above. That's deliberate: this pipeline's whole design (bed
+selection, looping) is built around *ambient texture* that's repeat-tolerant
+and doesn't need every second kept. Speech is the opposite -- every word
+matters and it isn't repeat-tolerant -- so the speech script skips bed
+selection and looping entirely and just processes the recording (or your
+`--start`/`--end` span) once, start to finish.
+
+```bash
+python3 process_speech_wav.py interview.wav --preset apple
+```
+
+Chain: highpass (rumble/plosives) -> gentle presence EQ -> de-esser (tame
+sibilance) -> gentle compressor (evens out level swings between mic
+distance/energy/speakers) -> two-pass loudnorm to a podcast loudness target
+-> short fades -> true-peak limiter. `--no-compress`/`--no-deess` skip
+either step if you'd rather handle it yourself.
+
+`--preset` picks a loudness target: `apple` (-16 LUFS), `spotify` (-19
+LUFS), `youtube` (-14 LUFS), or `general` (-16 LUFS, the default). These
+are commonly-cited platform targets, not fetched from a live spec -- confirm
+against each platform's current published loudness guidance before assuming
+they haven't moved. `--target-i`/`--target-tp`/`--target-lra` override
+individual values if you need something else. `--mono` downmixes before
+normalizing, since several platforms define their loudness target for mono.
+
+`--trim-silence` trims only leading/trailing silence (never touches
+mid-file pauses -- it uses ffmpeg's `silenceremove` in "leading edge" mode
+on the file and its reverse, specifically because the naive stop-at-silence
+approach mistakes an ordinary conversational pause for the end of the
+recording and truncates the file there). `--silence-threshold` (default
+-45dB) tunes what counts as silence.
+
+`--plan-only` prints the resolved chain and targets without rendering.
+
 ## Removing unwanted noise or a voice/foreground
 
 Two optional, narrower alternatives to full "stem isolation" (which isn't
@@ -183,7 +221,10 @@ month from now you can see exactly what was applied to a given master.
 
 ## Layout
 
-- `process_field_wav.py` / `process_field_wav.sh` -- the main pipeline
+- `process_field_wav.py` / `process_field_wav.sh` -- the main nature-ambience
+  pipeline
+- `process_speech_wav.py` -- standalone dialogue/podcast processing (no bed
+  selection, no looping)
 - `analyze_windows.py` -- clean-run / bed-selection analysis
 - `loop_crossfade.py` -- equal-power seamless loop builder
 - `denoise_profile.py` -- noise-profile subtraction for a known steady noise
