@@ -51,6 +51,8 @@ def _tool(name: str) -> Path:
 
 ANALYZE = _tool("analyze_windows.py")
 LOOP = _tool("loop_crossfade.py")
+REMOVE_FOREGROUND = _tool("remove_foreground.py")
+DENOISE_PROFILE = _tool("denoise_profile.py")
 
 # ---------------------------------------------------------------------------
 # Recipes: EQ chains, loudness targets, bed-selection strategy, and the
@@ -147,6 +149,35 @@ def preflight() -> None:
             "missing required python package(s) for the analysis/loop helper scripts: "
             + ", ".join(missing_mod)
             + f". Install with `pip3 install {' '.join(missing_mod)} --break-system-packages`."
+        )
+
+
+def preflight_voice_removal() -> None:
+    """Only called when --remove-voice is passed -- this dependency (torch +
+    demucs, a GB+ download) is not part of the normal preflight check."""
+    missing = []
+    for mod in ("torch", "demucs"):
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(mod)
+    if missing:
+        die(
+            "missing package(s) for --remove-voice: " + ", ".join(missing)
+            + ". Install with `pip3 install torch --break-system-packages` then "
+            "`pip3 install demucs --break-system-packages` (a GB+ download, only "
+            "needed for this flag)."
+        )
+
+
+def preflight_denoise_profile() -> None:
+    """Only called when --denoise-profile-* is passed."""
+    try:
+        __import__("noisereduce")
+    except ImportError:
+        die(
+            "missing package for --denoise-profile-*: noisereduce. "
+            "Install with `pip3 install noisereduce --break-system-packages`."
         )
 
 
@@ -554,6 +585,50 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the chosen bed, EQ chain, and loudness targets, then exit without rendering",
     )
+    p.add_argument(
+        "--remove-voice",
+        action="store_true",
+        help="Run Demucs vocal separation on the trimmed bed to strip a speech-like "
+        "foreground (talking, footsteps, a passing conversation) before EQ. Heavy "
+        "optional dependency (torch + demucs, GB+ download); see remove_foreground.py.",
+    )
+    p.add_argument(
+        "--voice-model",
+        default="htdemucs",
+        help="Demucs model name for --remove-voice (default: htdemucs)",
+    )
+    p.add_argument(
+        "--denoise-profile-start",
+        type=parse_timestamp,
+        help="Start of a noise-only span within the trimmed bed (0 = start of bed), used "
+        "to build a spectral profile of a known steady noise (hum, hiss, distant "
+        "traffic) and subtract it. Pair with --denoise-profile-end, or use "
+        "--denoise-profile-file instead. See denoise_profile.py.",
+    )
+    p.add_argument(
+        "--denoise-profile-end",
+        type=parse_timestamp,
+        help="End of the noise-only span (see --denoise-profile-start).",
+    )
+    p.add_argument(
+        "--denoise-profile-file",
+        type=Path,
+        help="Alternative to --denoise-profile-start/-end: a separate short WAV "
+        "containing just the unwanted noise.",
+    )
+    p.add_argument(
+        "--denoise-non-stationary",
+        action="store_true",
+        help="For --denoise-profile-*: the noise's character drifts over time "
+        "(default assumes a steady/stationary noise).",
+    )
+    p.add_argument(
+        "--denoise-prop-decrease",
+        type=float,
+        default=1.0,
+        help="For --denoise-profile-*: how aggressively to subtract the noise profile, "
+        "0-1 (default 1.0 = full).",
+    )
     return p
 
 
@@ -621,6 +696,58 @@ def main() -> int:
 
     trim_path = out_dir / "02_trim.wav"
     copy_trim(src, trim_path, start, end)
+
+    pre_eq_notes: list[str] = []
+    have_profile = (
+        args.denoise_profile_start is not None
+        or args.denoise_profile_end is not None
+        or args.denoise_profile_file is not None
+    )
+    if have_profile and not args.plan_only:
+        if (args.denoise_profile_start is None) != (args.denoise_profile_end is None):
+            die("pass both --denoise-profile-start and --denoise-profile-end, or neither")
+        if args.denoise_profile_file is not None and args.denoise_profile_start is not None:
+            die("pass --denoise-profile-start/-end OR --denoise-profile-file, not both")
+        preflight_denoise_profile()
+        denoised = out_dir / "02a_denoise_profile.wav"
+        cmd = [
+            "python3", str(DENOISE_PROFILE), str(trim_path), "--out", str(denoised),
+            "--prop-decrease", str(args.denoise_prop_decrease),
+        ]
+        if args.denoise_non_stationary:
+            cmd.append("--non-stationary")
+        if args.denoise_profile_file is not None:
+            cmd.extend(["--noise-file", str(args.denoise_profile_file)])
+        else:
+            cmd.extend([
+                "--noise-start", f"{args.denoise_profile_start:.3f}",
+                "--noise-end", f"{args.denoise_profile_end:.3f}",
+            ])
+        print(f"+ denoise-profile: {' '.join(cmd)}")
+        subprocess.check_call(cmd)
+        trim_path = denoised
+        noise_desc = (
+            str(args.denoise_profile_file)
+            if args.denoise_profile_file is not None
+            else f"{args.denoise_profile_start:.2f}-{args.denoise_profile_end:.2f}s of trimmed bed"
+        )
+        pre_eq_notes.append(
+            f"denoise_profile=yes noise={noise_desc} "
+            f"non_stationary={args.denoise_non_stationary} prop_decrease={args.denoise_prop_decrease}"
+        )
+
+    if args.remove_voice and not args.plan_only:
+        preflight_voice_removal()
+        voice_removed = out_dir / "02b_voice_removed.wav"
+        cmd = [
+            "python3", str(REMOVE_FOREGROUND), str(trim_path),
+            "--out", str(voice_removed), "--model", args.voice_model,
+        ]
+        print(f"+ remove-voice: {' '.join(cmd)}")
+        subprocess.check_call(cmd)
+        trim_path = voice_removed
+        pre_eq_notes.append(f"remove_voice=yes model={args.voice_model}")
+
     vd_trim = volumedetect(trim_path)
     max_vol = vd_trim["max_volume"] if vd_trim["max_volume"] is not None else -12.0
 
@@ -649,6 +776,10 @@ def main() -> int:
         print(f"short targets: I={short_i} TP={short_tp} LRA={short_lra}")
         print(f"short loop mode resolved to: {loop_mode}")
         print(f"correlated_water(no free wrap): {args.label in CORRELATED_WATER}")
+        if have_profile:
+            print("denoise-profile: would run (skipped for --plan-only)")
+        if args.remove_voice:
+            print("remove-voice: would run (skipped for --plan-only)")
         return 0
 
     eq_path = out_dir / "03_eq.wav"
@@ -666,8 +797,11 @@ def main() -> int:
         f"source_max_volume={vd0['max_volume']}",
         f"trim_max_volume={vd_trim['max_volume']}",
         f"eq={chain}",
-        "did_not=stem_split,fake_LRA,delete_source",
+        "did_not=fake_LRA,delete_source",
     ]
+    if not args.remove_voice:
+        report.append("did_not_stem_split=true (pass --remove-voice to enable)")
+    report.extend(pre_eq_notes)
     if recipe.get("untested"):
         report.append(f"untested_recipe={args.label} (A/B before trusting unattended)")
 
