@@ -12,12 +12,32 @@ clean-run detection thresholds) in `recipes.json` rather than buried in code.
 ## Requirements
 
 - `ffmpeg` / `ffprobe` on your PATH (with `afftdn`, `adeclick`, `adeclip`,
-  `acrossfade`, `alimiter`, `loudnorm`, `equalizer` -- a normal full-featured
-  build has all of these)
-- Python 3 with `numpy` and `scipy`
+  `acrossfade`, `alimiter`, `loudnorm`, `equalizer`, `deesser`,
+  `acompressor`, `silenceremove` -- a normal full-featured build has all of
+  these)
+- Python 3, plus the packages in `requirements.txt`:
 
-The script checks all of this itself at startup and fails with a clear
-message (and an install hint) if anything is missing.
+  ```bash
+  pip3 install -r requirements.txt --break-system-packages
+  ```
+
+  That's `numpy`/`scipy` for the nature pipeline's bed analysis and looping
+  (`process_speech_wav.py` doesn't need either -- it's pure ffmpeg). Two
+  features have their own heavy, genuinely optional dependencies, listed
+  separately in `requirements-optional.txt` rather than bundled in here so
+  installing the repo doesn't pull in a multi-GB `torch` download by
+  default: `--denoise-profile-*` needs `noisereduce`, and
+  `--remove-voice`/`--remove-voice-at` needs `torch` + `demucs`. Install
+  either only if you're using the flag that needs it:
+
+  ```bash
+  pip3 install -r requirements-optional.txt --break-system-packages
+  ```
+
+Each script checks its own dependencies at startup (or lazily, only when a
+flag that needs an optional one is passed) and fails with a clear message
+-- including an install hint -- if anything is missing, rather than a raw
+traceback.
 
 ## Quick start
 
@@ -151,7 +171,9 @@ Two optional, narrower alternatives to full "stem isolation" (which isn't
 realistic for nature-sound content -- separating rain from crickets from
 birds with off-the-shelf tools produces artifact-heavy results, so this
 pipeline doesn't attempt it). These solve two specific, tractable problems
-instead:
+instead. Both live in `requirements-optional.txt` (see Requirements above)
+if you'd rather install everything for a feature at once than run the
+individual `pip3 install` commands below:
 
 **A known, steady noise (hum, hiss, distant traffic, an AC unit)** --
 `denoise_profile.py` samples a few seconds of *just that noise* (a stretch
@@ -256,5 +278,8 @@ month from now you can see exactly what was applied to a given master.
 - `batch_process.py` -- run the pipeline over a folder or CSV manifest
 - `recipes.json` -- per-label EQ chains, loudness targets, loop policy,
   clean-run detector tuning
+- `requirements.txt` -- core Python dependencies (numpy/scipy)
+- `requirements-optional.txt` -- heavy, feature-specific dependencies
+  (noisereduce, torch, demucs) -- install only what you need
 - `youtube-mux.md` -- listing/thumbnail conventions
 - `ROBUSTNESS_PLAN.md` -- the analysis this rewrite was built from

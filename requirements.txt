@@ -1,0 +1,18 @@
+# Core dependencies for the nature-ambience pipeline: process_field_wav.py
+# always shells out to analyze_windows.py for bed analysis (not optional),
+# and to loop_crossfade.py when a Short needs the equal-power wrap loop --
+# both of those need numpy/scipy directly. batch_process.py just wraps
+# process_field_wav.py, so it inherits the same requirement.
+#
+# process_speech_wav.py (interview/podcast processing) does NOT need
+# numpy/scipy at all -- it's pure ffmpeg + Python stdlib, no bed selection
+# or looping involved. Installing this file is still harmless for it.
+#
+# Versions below are floors, not exact pins. This repo was developed and
+# tested against numpy 2.2.6 / scipy 1.15.3 on Python 3.10 -- reasonably
+# recent versions of either should work fine, since the APIs used here
+# (np.percentile, np.fromfile, np.tile, scipy.signal.butter/sosfiltfilt)
+# have been stable for years. Install with:
+#   pip3 install -r requirements.txt --break-system-packages
+numpy>=1.24
+scipy>=1.10

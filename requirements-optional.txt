@@ -1,0 +1,25 @@
+# Optional, heavy dependencies. Nothing here is checked by the normal
+# preflight() in process_field_wav.py -- each is checked lazily, only when
+# the flag that needs it is actually passed, so you don't pay for a
+# multi-GB torch install unless you actually want --remove-voice. Install
+# only the section(s) you need, not this whole file blindly:
+#   pip3 install -r requirements-optional.txt --break-system-packages
+
+# --denoise-profile-start/-end or --denoise-profile-file (denoise_profile.py):
+# spectral noise-profile subtraction for a known steady noise (hum, hiss,
+# distant traffic). Tested against noisereduce 3.0.3.
+noisereduce>=3.0
+
+# --remove-voice / --remove-voice-at (remove_foreground.py): Demucs
+# pretrained vocal-separation model, used to strip a speech-like foreground
+# (voice, footsteps, a passing conversation). This is a genuinely heavy,
+# optional pair -- torch is a GB+ download, plus ~80MB of pretrained model
+# weights fetched on Demucs' first run. Tested against torch 2.13.0 /
+# demucs 4.0.1. On some networks, `pip install demucs` can fail trying to
+# build a transitive dependency (sphn) from source if no prebuilt wheel is
+# available for your platform; if that happens, a known workaround is
+# `pip install demucs==4.0.1 --no-deps` followed by installing its actual
+# runtime dependencies directly: einops julius openunmix lameenc diffq
+# dora-search.
+torch
+demucs
