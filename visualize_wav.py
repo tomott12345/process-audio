@@ -7,33 +7,82 @@ top of this repo's core numpy/scipy requirements, plus the ffmpeg binary on
 PATH. Nothing else in the repo depends on this script.
 
 Pipeline:
-  1. Load audio with librosa, compute a mel spectrogram (drives radial bars)
-     and an RMS envelope (drives a pulsing center circle).
-  2. Render each frame with Pillow (fast — no matplotlib per-frame overhead).
-  3. Stream raw RGB frames into an ffmpeg subprocess that muxes them with the
-     original audio into a single .mp4 (no intermediate frame files).
+  1. Load audio with librosa, compute a mel spectrogram (drives radial bars
+     or bar-equalizer heights), an RMS envelope (drives a pulsing center
+     circle / overall brightness), and an onset envelope (drives particle
+     spawning and the beat-punch zoom).
+  2. Render each frame's new light (bars/circle, and for --symmetry>1 one
+     wedge rotated into N copies) onto a black Pillow layer at a
+     supersampled resolution, then downsample that layer once to the
+     target resolution with the BOX filter (exact area averaging -- clean,
+     fast anti-aliasing for an integer supersample factor, unlike Pillow's
+     native jagged line/ellipse drawing at 1x).
+  3. Spawn/update/draw particles at bar tips (output resolution).
+  4. Composite that anti-aliased layer into a persistent float32
+     accumulation buffer at output resolution: the previous buffer is
+     faded (motion trails) and the new layer plus a box-blurred, additive
+     copy of it (bloom/glow) are added on top. Trails/bloom run at output
+     resolution rather than supersampled resolution on purpose -- blur
+     cost scales with pixel count, so this is the difference between a
+     blur that costs tens of milliseconds a frame and one that costs
+     hundreds.
+  5. On a detected onset, briefly zoom the composited frame (beat punch).
+  6. Draw the title crisply on top (it does not get blurred, trailed, or
+     zoomed), and stream the raw RGB bytes into an ffmpeg subprocess that
+     muxes them with the original audio into a single .mp4 (no
+     intermediate frame files).
 
 Usage:
   python3 visualize_wav.py input.wav output.mp4 --format shorts --style radial
   python3 visualize_wav.py input.wav output.mp4 --format landscape --style bars
   python3 visualize_wav.py input.wav output.mp4 --format shorts --title "Contemplation"
+  python3 visualize_wav.py input.wav output.mp4 --format shorts --symmetry 6
+  python3 visualize_wav.py input.wav output.mp4 --format shorts --no-particles --no-beat-punch --symmetry 1
 
 Formats:
   shorts     1080x1920 (9:16, YouTube Shorts / Reels / TikTok)
   landscape  1920x1080 (16:9, standard YouTube)
   square     1080x1080 (1:1)
 
+Look/style knobs (all optional, sensible defaults on):
+  --supersample N      render at Nx resolution internally, then downsample
+                        with the BOX filter for anti-aliased edges (default
+                        2; use 1 to disable and render fastest)
+  --trail-decay F       0..1, how much of the previous frame survives into
+                        the next (default 0.85; 1.0 = trails never fade,
+                        0 = no trails at all -- equivalent to --no-trails)
+  --glow-strength F     intensity of the additive bloom around bright
+                        elements (default 0.55; 0 = equivalent to --no-glow)
+  --glow-radius PX      blur radius for the bloom, in output pixels
+                        (default: scales with frame size)
+  --no-trails           disable motion trails (same as --trail-decay 0)
+  --no-glow             disable bloom (same as --glow-strength 0)
+  --particles           spawn small drifting sparks at active bar tips
+                        (default on)
+  --no-particles        disable particles
+  --particle-rate F      spawn probability scale per band per frame,
+                        proportional to that band's amplitude (default 0.5)
+  --max-particles N      cap on simultaneous particles (default 260)
+  --beat-punch           brief zoom/flash on detected onsets (default on)
+  --no-beat-punch        disable beat punch
+  --punch-strength F      max zoom fraction on a strong onset (default 0.045)
+  --symmetry N           radial style only: draw one 1/N wedge and rotate
+                        it into N copies for a kaleidoscope/mandala look
+                        (default 1 = off; try 6 or 8)
+
 Requires: librosa, numpy, pillow, and the ffmpeg binary on PATH.
 """
 
 import argparse
+import colorsys
 import math
+import random
 import subprocess
 import sys
 import shutil
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 FORMATS = {
     "shorts": (1080, 1920),
@@ -42,8 +91,29 @@ FORMATS = {
 }
 
 
-def load_features(wav_path, fps, n_bands=48, sr_target=22050):
-    """Load audio and compute per-frame band energies + RMS envelope."""
+def build_pulse_envelope(onset_frames, n_frames, decay=0.72):
+    """1.0 on a detected onset frame, decaying exponentially until the next
+    one -- turns a sparse list of hit times into a continuous per-frame
+    "how hard are we mid-beat right now" signal, suitable for driving a
+    zoom, a flash, or a heartbeat-style pulse."""
+    env = np.zeros(n_frames, dtype=np.float32)
+    for f in onset_frames:
+        if f < n_frames:
+            env[f] = 1.0
+    for i in range(1, n_frames):
+        env[i] = max(env[i], env[i - 1] * decay)
+    return env
+
+
+def load_features(wav_path, fps, n_bands=48, sr_target=22050, kick_fmax=200.0):
+    """Load audio and compute per-frame band energies, RMS envelope, a
+    full-band onset "punch" envelope (drives beat-punch zoom/particles),
+    and a bass-restricted "kick" envelope (drives the center emoji pulse)
+    -- all aligned to the same per-video-frame grid since they share
+    hop_length. Restricting the kick envelope's onset detection to
+    low frequencies (below kick_fmax Hz, the kick drum's fundamental +
+    near harmonics) is what keeps it responding mainly to kick/bass hits
+    rather than every snare or hi-hat too."""
     import librosa
 
     y, sr = librosa.load(wav_path, sr=sr_target, mono=True)
@@ -54,7 +124,6 @@ def load_features(wav_path, fps, n_bands=48, sr_target=22050):
         y=y, sr=sr, n_mels=n_bands, hop_length=hop_length, fmax=sr / 2
     )
     mel_db = librosa.power_to_db(mel, ref=np.max)
-    # normalize each band to 0..1 across the whole track
     mel_db = mel_db - mel_db.min()
     if mel_db.max() > 0:
         mel_db = mel_db / mel_db.max()
@@ -64,7 +133,26 @@ def load_features(wav_path, fps, n_bands=48, sr_target=22050):
         rms = rms / rms.max()
 
     n_frames = mel_db.shape[1]
-    return mel_db, rms, n_frames, duration, y, sr
+
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
+    onset_frames = librosa.onset.onset_detect(
+        onset_envelope=onset_env, sr=sr, hop_length=hop_length, units="frames"
+    )
+    punch_env = build_pulse_envelope(onset_frames, n_frames, decay=0.72)
+
+    # fewer, wider mel bins for this one -- the default 128 mel bins packed
+    # into a narrow 0-kick_fmax Hz range leaves many of them empty (librosa
+    # warns about it) and buys nothing extra for a single low-frequency
+    # onset envelope
+    bass_onset_env = librosa.onset.onset_strength(
+        y=y, sr=sr, hop_length=hop_length, fmax=kick_fmax, n_mels=24
+    )
+    kick_frames = librosa.onset.onset_detect(
+        onset_envelope=bass_onset_env, sr=sr, hop_length=hop_length, units="frames"
+    )
+    kick_env = build_pulse_envelope(kick_frames, n_frames, decay=0.8)
+
+    return mel_db, rms, punch_env, kick_env, n_frames, duration, y, sr
 
 
 def smooth(prev, target, attack=0.55, release=0.15):
@@ -76,72 +164,7 @@ def smooth(prev, target, attack=0.55, release=0.15):
     return out
 
 
-def draw_radial_frame(w, h, bands, rms_val, t, title=None, font=None):
-    img = Image.new("RGB", (w, h), (8, 8, 14))
-    draw = ImageDraw.Draw(img)
-    cx, cy = w // 2, h // 2
-    n = len(bands)
-    base_r = min(w, h) * 0.16 * (1 + 0.08 * rms_val)
-    max_extra = min(w, h) * 0.30
-
-    for i, amp in enumerate(bands):
-        angle = (i / n) * 2 * math.pi - math.pi / 2
-        r1 = base_r
-        r2 = base_r + max_extra * (0.08 + amp)
-        x1, y1 = cx + r1 * math.cos(angle), cy + r1 * math.sin(angle)
-        x2, y2 = cx + r2 * math.cos(angle), cy + r2 * math.sin(angle)
-        hue = (i / n) * 0.6 + 0.55  # blue -> violet -> pink sweep
-        color = hsv_to_rgb(hue % 1.0, 0.65, 0.95)
-        width = max(2, int(min(w, h) * 0.006))
-        draw.line([(x1, y1), (x2, y2)], fill=color, width=width)
-
-    glow_r = base_r * 0.9
-    draw.ellipse(
-        [cx - glow_r, cy - glow_r, cx + glow_r, cy + glow_r],
-        outline=(230, 230, 255),
-        width=3,
-    )
-
-    if title:
-        tw = draw.textlength(title, font=font)
-        draw.text((cx - tw / 2, h * 0.86), title, fill=(220, 220, 230), font=font)
-
-    return img
-
-
-def draw_bars_frame(w, h, bands, rms_val, t, title=None, font=None):
-    img = Image.new("RGB", (w, h), (10, 10, 16))
-    draw = ImageDraw.Draw(img)
-    n = len(bands)
-    margin = w * 0.04
-    gap = 4
-    bar_w = (w - 2 * margin - gap * (n - 1)) / n
-    baseline = h * 0.72
-    max_h = h * 0.5
-
-    for i, amp in enumerate(bands):
-        bh = max(0.0, max_h * float(amp))
-        x0 = margin + i * (bar_w + gap)
-        x1 = x0 + bar_w
-        y0 = baseline - bh
-        y1 = baseline
-        hue = 0.55 + 0.35 * (i / n)
-        color = hsv_to_rgb(hue, 0.7, 0.9 + 0.1 * min(1.0, amp))
-        draw.rectangle([x0, y0, x1, y1], fill=color)
-        # mirrored reflection, faded
-        refl_h = bh * 0.35
-        if refl_h > 0.5:
-            draw.rectangle([x0, y1, x1, y1 + refl_h], fill=tuple(c // 4 for c in color))
-
-    if title:
-        tw = draw.textlength(title, font=font)
-        draw.text((w / 2 - tw / 2, h * 0.85), title, fill=(220, 220, 230), font=font)
-
-    return img
-
-
 def hsv_to_rgb(h, s, v):
-    import colorsys
     r, g, b = colorsys.hsv_to_rgb(h, s, v)
     return (int(r * 255), int(g * 255), int(b * 255))
 
@@ -158,6 +181,350 @@ def load_font(size):
     return ImageFont.load_default()
 
 
+EMOJI_FONT_CANDIDATES = (
+    # Linux (this repo's own containers, most Linux desktops with a
+    # noto-color-emoji package installed)
+    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+    "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+    # macOS
+    "/System/Library/Fonts/Apple Color Emoji.ttc",
+)
+
+_HEART_CHARS = {"❤️", "❤", "♥️", "♥", "heart", "red heart"}
+
+
+def render_emoji_glyph(emoji, px=256):
+    """Render a single emoji/character to a tightly-cropped RGBA image using
+    whatever color-capable system emoji font is available, then resize to
+    px -- rendered once, resized per-frame for the beat pulse from that one
+    render (cheap: resizing a small bitmap, not re-rendering text every
+    frame). Returns None if no usable font is found or the glyph comes back
+    blank (e.g. a tofu box), so the caller can fall back.
+
+    Color emoji fonts are typically fixed-strike bitmap fonts (CBDT/CBLC)
+    that only support specific embedded pixel sizes -- e.g. Noto Color
+    Emoji ships exactly one strike, 109px -- so ImageFont.truetype(path, N)
+    raises OSError("invalid pixel size") for any other N. We try a handful
+    of known strike sizes rather than assume one."""
+    for path in EMOJI_FONT_CANDIDATES:
+        for try_px in (109, 128, 136, 160, 96, px):
+            try:
+                font = ImageFont.truetype(path, try_px)
+            except Exception:
+                continue
+            try:
+                canvas_px = try_px * 2
+                canvas = Image.new("RGBA", (canvas_px, canvas_px), (0, 0, 0, 0))
+                draw = ImageDraw.Draw(canvas)
+                draw.text((try_px // 2, try_px // 2), emoji, font=font, embedded_color=True)
+                bbox = canvas.getbbox()
+                if not bbox:
+                    continue
+                glyph = canvas.crop(bbox)
+                # pad to square before the final resize so a non-square
+                # glyph bbox (e.g. a flame taller than it is wide) doesn't
+                # get stretched when main() later treats it as size_px x
+                # size_px
+                side = max(glyph.size)
+                square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+                square.paste(glyph, ((side - glyph.width) // 2, (side - glyph.height) // 2), glyph)
+                return square.resize((px, px), Image.LANCZOS)
+            except Exception:
+                continue
+    return None
+
+
+def render_vector_heart(px=256, fill=(230, 30, 60, 255), outline=(255, 120, 140, 255)):
+    """Hand-drawn heart as a fallback for when no color emoji font is
+    available (or for a cleaner, more 'neon' look than a flat bitmap emoji
+    anyway) -- two overlapping circles plus a triangle, the classic
+    construction, anti-aliased by drawing at 4x and downsampling."""
+    ss = 4
+    size = px * ss
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+    cx, r = size / 2, size * 0.26
+    lobe_dx = r * 0.95
+    draw.ellipse([cx - lobe_dx - r, size * 0.20, cx - lobe_dx + r, size * 0.20 + 2 * r], fill=fill)
+    draw.ellipse([cx + lobe_dx - r, size * 0.20, cx + lobe_dx + r, size * 0.20 + 2 * r], fill=fill)
+    draw.polygon(
+        [
+            (cx - lobe_dx - r, size * 0.20 + r * 0.9),
+            (cx + lobe_dx + r, size * 0.20 + r * 0.9),
+            (cx, size * 0.92),
+        ],
+        fill=fill,
+    )
+    canvas = canvas.resize((px, px), Image.LANCZOS)
+    bbox = canvas.getbbox()
+    return canvas.crop(bbox) if bbox else canvas
+
+
+def get_emoji_glyph(emoji):
+    """Try the system emoji font first; fall back to the hand-drawn heart
+    for any heart-like request so that's always reliable regardless of
+    what fonts happen to be installed. Returns None for a non-heart emoji
+    with no usable font (caller should warn and skip)."""
+    glyph = render_emoji_glyph(emoji)
+    if glyph is not None:
+        return glyph
+    if emoji.strip().lower() in _HEART_CHARS:
+        return render_vector_heart()
+    return None
+
+
+def radial_bar_geometry(w, h, bands, rms_val, angle_offset=0.0, angle_span=2 * math.pi):
+    """Shared geometry for the radial style: yields (x1,y1,x2,y2,color,width,tip_x,tip_y,amp)
+    for each band, and returns base_r too (needed for the center ring)."""
+    cx, cy = w // 2, h // 2
+    n = len(bands)
+    base_r = min(w, h) * 0.16 * (1 + 0.08 * rms_val)
+    max_extra = min(w, h) * 0.30
+    bars = []
+    for i, amp in enumerate(bands):
+        frac = i / max(1, n - 1) if n > 1 else 0.0
+        angle = angle_offset + frac * angle_span - math.pi / 2
+        r1 = base_r
+        r2 = base_r + max_extra * (0.08 + amp)
+        x1, y1 = cx + r1 * math.cos(angle), cy + r1 * math.sin(angle)
+        x2, y2 = cx + r2 * math.cos(angle), cy + r2 * math.sin(angle)
+        hue = frac * 0.6 + 0.55
+        color = hsv_to_rgb(hue % 1.0, 0.65, 0.95)
+        width = max(2, int(min(w, h) * 0.006))
+        bars.append((x1, y1, x2, y2, color, width, x2, y2, amp))
+    return bars, cx, cy, base_r
+
+
+def rotate_point(x, y, cx, cy, angle_deg):
+    a = math.radians(angle_deg)
+    dx, dy = x - cx, y - cy
+    return (cx + dx * math.cos(a) - dy * math.sin(a), cy + dx * math.sin(a) + dy * math.cos(a))
+
+
+def base_ring_radius(w, h, rms_val):
+    return min(w, h) * 0.16 * (1 + 0.08 * rms_val)
+
+
+def draw_radial_layer(hi_w, hi_h, out_w, out_h, bands, rms_val, symmetry=1):
+    """New light for this frame only, on a pure black background -- no
+    title, no persistent state, no particles. Returns an image already at
+    OUTPUT resolution (hi_w/hi_h are used only for anti-aliasing the initial
+    draw) plus spawn_points in output-resolution coordinates.
+
+    When symmetry<=1: draw once at hi-res, downsample once with BOX. Cheap.
+
+    When symmetry>1 (kaleidoscope/mandala): draw one 1/symmetry wedge at
+    hi-res, downsample THAT wedge once with BOX, then do the `symmetry`
+    rotations at output resolution instead of hi-res -- rotating a full
+    hi-res frame N times is the single most expensive thing this script can
+    do (each rotate scales with pixel count), so doing it post-downsample
+    is what keeps --symmetry usably fast."""
+    ss_x, ss_y = hi_w / out_w, hi_h / out_h
+
+    if symmetry <= 1:
+        img = Image.new("RGB", (hi_w, hi_h), (0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        bars, cx, cy, base_r = radial_bar_geometry(hi_w, hi_h, bands, rms_val)
+        for x1, y1, x2, y2, color, width, tip_x, tip_y, amp in bars:
+            draw.line([(x1, y1), (x2, y2)], fill=color, width=width)
+        ring_r = base_r * 0.9
+        draw.ellipse(
+            [cx - ring_r, cy - ring_r, cx + ring_r, cy + ring_r],
+            outline=(230, 230, 255),
+            width=max(2, int(min(hi_w, hi_h) * 0.003)),
+        )
+        out_img = img.resize((out_w, out_h), Image.BOX) if (hi_w, hi_h) != (out_w, out_h) else img
+        spawn_points = [(x2 / ss_x, y2 / ss_y, color, amp) for x1, y1, x2, y2, color, width, _, _, amp in bars]
+        return out_img, spawn_points
+
+    n = len(bands)
+    wedge_n = max(2, n // symmetry)
+    # sample the wedge's bands spread across the whole spectrum (stride)
+    # rather than just the low end, so each wedge reflects bass through
+    # treble, not only bass
+    stride = max(1, n // wedge_n)
+    wedge_bands = bands[::stride][:wedge_n]
+    span = 2 * math.pi / symmetry
+
+    wedge_img_hi = Image.new("RGB", (hi_w, hi_h), (0, 0, 0))
+    wedge_draw = ImageDraw.Draw(wedge_img_hi)
+    bars_hi, cx_hi, cy_hi, base_r_hi = radial_bar_geometry(
+        hi_w, hi_h, wedge_bands, rms_val, angle_offset=0.0, angle_span=span
+    )
+    for x1, y1, x2, y2, color, width, *_ in bars_hi:
+        wedge_draw.line([(x1, y1), (x2, y2)], fill=color, width=width)
+    wedge_out = wedge_img_hi.resize((out_w, out_h), Image.BOX) if (hi_w, hi_h) != (out_w, out_h) else wedge_img_hi
+
+    # tip coordinates computed directly at output resolution -- cheap
+    # (pure arithmetic, no drawing) and avoids scaling rounding
+    bars_out, cx, cy, base_r = radial_bar_geometry(
+        out_w, out_h, wedge_bands, rms_val, angle_offset=0.0, angle_span=span
+    )
+
+    acc = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+    step_deg = 360.0 / symmetry
+    spawn_points = []
+    for k in range(symmetry):
+        angle = step_deg * k
+        # NEAREST here, not BILINEAR: this gets box-blurred (bloom) and
+        # trail-blended immediately after, which hides NEAREST's jaggies
+        # completely while cutting rotation cost several times over --
+        # rotation is the single most expensive part of --symmetry mode.
+        rotated = wedge_out.rotate(angle, resample=Image.NEAREST, center=(cx, cy))
+        acc = np.maximum(acc, np.asarray(rotated, dtype=np.uint8))
+        for x1, y1, x2, y2, color, width, tip_x, tip_y, amp in bars_out:
+            rx, ry = rotate_point(tip_x, tip_y, cx, cy, angle)
+            spawn_points.append((rx, ry, color, amp))
+
+    img = Image.fromarray(acc, mode="RGB")
+    draw = ImageDraw.Draw(img)
+    ring_r = base_r * 0.9
+    draw.ellipse(
+        [cx - ring_r, cy - ring_r, cx + ring_r, cy + ring_r],
+        outline=(230, 230, 255),
+        width=max(2, int(min(out_w, out_h) * 0.003)),
+    )
+    return img, spawn_points
+
+
+def draw_bars_layer(hi_w, hi_h, out_w, out_h, bands, rms_val, symmetry=1):
+    """symmetry is accepted (and ignored) for interface parity with
+    draw_radial_layer -- --symmetry only applies to --style radial."""
+    w, h = hi_w, hi_h
+    img = Image.new("RGB", (w, h), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    n = len(bands)
+    margin = w * 0.04
+    gap = 4
+    bar_w = (w - 2 * margin - gap * (n - 1)) / n
+    baseline = h * 0.72
+    max_h = h * 0.5
+
+    spawn_points_hi = []
+    for i, amp in enumerate(bands):
+        bh = max(0.0, max_h * float(amp))
+        x0 = margin + i * (bar_w + gap)
+        x1 = x0 + bar_w
+        y0 = baseline - bh
+        y1 = baseline
+        hue = 0.55 + 0.35 * (i / n)
+        color = hsv_to_rgb(hue, 0.7, 0.9 + 0.1 * min(1.0, amp))
+        draw.rectangle([x0, y0, x1, y1], fill=color)
+        refl_h = bh * 0.35
+        if refl_h > 0.5:
+            draw.rectangle([x0, y1, x1, y1 + refl_h], fill=tuple(c // 4 for c in color))
+        spawn_points_hi.append(((x0 + x1) / 2, y0, color, amp))
+
+    out_img = img.resize((out_w, out_h), Image.BOX) if (hi_w, hi_h) != (out_w, out_h) else img
+    ss_x, ss_y = hi_w / out_w, hi_h / out_h
+    spawn_points = [(x / ss_x, y / ss_y, c, a) for x, y, c, a in spawn_points_hi]
+    return out_img, spawn_points
+
+
+class ParticleSystem:
+    """Small drifting sparks spawned at active bar tips. Cheap Python-object
+    list rather than numpy arrays -- particle counts here (a few hundred at
+    most) are far below where vectorization would pay for its own overhead,
+    and it keeps spawn/kill logic simple."""
+
+    def __init__(self, max_particles, spawn_rate, fps):
+        self.max_particles = max_particles
+        self.spawn_rate = spawn_rate
+        self.fps = fps
+        self.particles = []  # each: [x, y, vx, vy, age, life, color]
+
+    def spawn(self, spawn_points, threshold=0.35):
+        if len(self.particles) >= self.max_particles:
+            return
+        for x, y, color, amp in spawn_points:
+            if amp < threshold:
+                continue
+            if random.random() > amp * self.spawn_rate:
+                continue
+            if len(self.particles) >= self.max_particles:
+                break
+            angle = random.uniform(0, 2 * math.pi)
+            speed = (20 + 60 * amp) / self.fps * 30  # px/sec-ish, scaled by fps below
+            vx = math.cos(angle) * speed / self.fps
+            vy = math.sin(angle) * speed / self.fps - (10 / self.fps)  # slight upward bias
+            life = random.uniform(0.4, 0.9) * self.fps  # frames
+            self.particles.append([x, y, vx, vy, 0.0, life, color])
+
+    def update_and_draw(self, draw):
+        alive = []
+        for p in self.particles:
+            x, y, vx, vy, age, life, color = p
+            age += 1
+            if age >= life:
+                continue
+            x += vx
+            y += vy
+            vy += 0.02  # gentle drag toward outward drift settling
+            life_frac = 1.0 - (age / life)
+            r = max(1, 3.5 * life_frac)
+            faded = tuple(int(c * (0.4 + 0.6 * life_frac)) for c in color)
+            draw.ellipse([x - r, y - r, x + r, y + r], fill=faded)
+            alive.append([x, y, vx, vy, age, life, color])
+        self.particles = alive
+
+
+class FrameCompositor:
+    """Owns the persistent trail buffer and applies trails + bloom.
+
+    Supersampling is used only to anti-alias each frame's freshly drawn
+    lines/circles (drawn hi-res, downsampled once to output resolution
+    before reaching here). Trails and bloom then run entirely at output
+    resolution -- blur cost scales with pixel count, so doing it post-
+    downsample instead of at 2x-4x the pixels is the difference between
+    a blur that costs tens of milliseconds and one that costs hundreds.
+    """
+
+    def __init__(self, out_w, out_h, trail_decay, glow_strength, glow_radius):
+        self.out_w, self.out_h = out_w, out_h
+        self.trail_decay = trail_decay
+        self.glow_strength = glow_strength
+        self.glow_radius = glow_radius
+        self.buffer = np.zeros((out_h, out_w, 3), dtype=np.float32)
+
+    def composite(self, new_layer_img):
+        new_layer = np.asarray(new_layer_img, dtype=np.float32)
+
+        if self.trail_decay > 0:
+            self.buffer *= self.trail_decay
+        else:
+            self.buffer[:] = 0
+
+        if self.glow_strength > 0:
+            glow_img = new_layer_img.filter(ImageFilter.BoxBlur(self.glow_radius))
+            glow = np.asarray(glow_img, dtype=np.float32) * self.glow_strength
+            self.buffer += new_layer + glow
+        else:
+            self.buffer += new_layer
+
+        np.clip(self.buffer, 0, 255, out=self.buffer)
+        return Image.fromarray(self.buffer.astype(np.uint8), mode="RGB")
+
+
+def apply_beat_punch(img, punch, max_zoom_frac, w, h):
+    """Brief zoom toward center on a detected onset. Skipped entirely when
+    punch is near zero (most frames) so it costs nothing on average."""
+    if punch < 0.03:
+        return img
+    scale = 1.0 + max_zoom_frac * punch
+    new_w, new_h = int(w * scale), int(h * scale)
+    big = img.resize((new_w, new_h), Image.BILINEAR)
+    left = (new_w - w) // 2
+    top = (new_h - h) // 2
+    return big.crop((left, top, left + w, top + h))
+
+
+def draw_title(img, title, font, out_w, out_h):
+    draw = ImageDraw.Draw(img)
+    tw = draw.textlength(title, font=font)
+    draw.text((out_w / 2 - tw / 2, out_h * 0.86), title, fill=(220, 220, 230), font=font)
+    return img
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("wav_path")
@@ -168,20 +535,67 @@ def main():
     ap.add_argument("--bands", type=int, default=48)
     ap.add_argument("--title", default=None)
     ap.add_argument("--max-seconds", type=float, default=None, help="render only the first N seconds (quick preview)")
+    ap.add_argument("--supersample", type=int, default=2)
+    ap.add_argument("--trail-decay", type=float, default=0.85)
+    ap.add_argument("--glow-strength", type=float, default=0.55)
+    ap.add_argument("--glow-radius", type=float, default=None)
+    ap.add_argument("--no-trails", action="store_true")
+    ap.add_argument("--no-glow", action="store_true")
+    ap.add_argument("--no-particles", action="store_true")
+    ap.add_argument("--particle-rate", type=float, default=0.5)
+    ap.add_argument("--max-particles", type=int, default=260)
+    ap.add_argument("--no-beat-punch", action="store_true")
+    ap.add_argument("--punch-strength", type=float, default=0.045)
+    ap.add_argument("--symmetry", type=int, default=1, help="radial style only: draw a 1/N wedge rotated into N copies (default 1 = off)")
+    ap.add_argument("--emoji", default=None, help='emoji/character to place in the center (radial style only), e.g. "❤️", "\U0001f525", "⭐". Rendered via a system color-emoji font when available; falls back to a hand-drawn glowing heart if the font is missing and the character is heart-like.')
+    ap.add_argument("--emoji-beat", choices=["kick", "rms", "off"], default="kick", help="what drives the emoji's pulse size: kick-drum-restricted onsets (default), overall loudness, or a static size")
+    ap.add_argument("--emoji-size", type=float, default=0.22, help="base emoji size as a fraction of min(width,height) (default 0.22)")
+    ap.add_argument("--emoji-pulse", type=float, default=0.5, help="extra size fraction at peak beat strength (default 0.5, i.e. up to +50%% on a hard hit)")
+    ap.add_argument("--kick-fmax", type=float, default=200.0, help="Hz cutoff for what counts as 'kick drum' when --emoji-beat kick (default 200)")
     args = ap.parse_args()
 
     if shutil.which("ffmpeg") is None:
         sys.exit("ffmpeg not found on PATH. Install it (e.g. `brew install ffmpeg`) and retry.")
 
     w, h = FORMATS[args.format]
+    ss = max(1, args.supersample)
+    hi_w, hi_h = w * ss, h * ss
+
+    trail_decay = 0.0 if args.no_trails else max(0.0, min(1.0, args.trail_decay))
+    glow_strength = 0.0 if args.no_glow else max(0.0, args.glow_strength)
+    glow_radius = args.glow_radius if args.glow_radius is not None else min(w, h) * 0.012
+    particles_on = not args.no_particles
+    beat_punch_on = not args.no_beat_punch
+    symmetry = max(1, args.symmetry)
+    if symmetry > 1 and args.style != "radial":
+        print("Note: --symmetry only applies to --style radial; ignoring for bars.", file=sys.stderr)
+        symmetry = 1
+
     print(f"Loading audio and computing features ({args.bands} bands @ {args.fps}fps)...")
-    mel_db, rms, n_frames, duration, y, sr = load_features(args.wav_path, args.fps, args.bands)
+    mel_db, rms, punch_env, kick_env, n_frames, duration, y, sr = load_features(
+        args.wav_path, args.fps, args.bands, kick_fmax=args.kick_fmax
+    )
 
     if args.max_seconds:
         n_frames = min(n_frames, int(args.max_seconds * args.fps))
 
     font = load_font(int(h * 0.03))
-    draw_fn = draw_radial_frame if args.style == "radial" else draw_bars_frame
+    compositor = FrameCompositor(w, h, trail_decay, glow_strength, glow_radius)
+    particles = ParticleSystem(args.max_particles, args.particle_rate, args.fps) if particles_on else None
+
+    emoji_glyph = None
+    if args.emoji:
+        if args.style != "radial":
+            print("Note: --emoji only applies to --style radial; ignoring for bars.", file=sys.stderr)
+        else:
+            emoji_glyph = get_emoji_glyph(args.emoji)
+            if emoji_glyph is None:
+                print(
+                    f"Warning: no usable emoji font found for {args.emoji!r} and it's not "
+                    "heart-like (no built-in fallback for it) -- skipping the emoji.",
+                    file=sys.stderr,
+                )
+    emoji_base_px = min(w, h) * args.emoji_size
 
     ffmpeg_cmd = [
         "ffmpeg", "-y",
@@ -196,14 +610,51 @@ def main():
     proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
     prev_bands = np.zeros(args.bands)
-    print(f"Rendering {n_frames} frames at {w}x{h}...")
+    print(
+        f"Rendering {n_frames} frames at {w}x{h} (supersample {ss}x, "
+        f"trails={'on' if trail_decay > 0 else 'off'}, glow={'on' if glow_strength > 0 else 'off'}, "
+        f"particles={'on' if particles_on else 'off'}, beat-punch={'on' if beat_punch_on else 'off'}, "
+        f"symmetry={symmetry}, emoji={'on (' + args.emoji_beat + ')' if emoji_glyph is not None else 'off'})..."
+    )
     try:
         for i in range(n_frames):
             target = mel_db[:, i]
             prev_bands = smooth(prev_bands, target)
             t = i / args.fps
-            img = draw_fn(w, h, prev_bands, rms[i] if i < len(rms) else 0.0, t, args.title, font)
-            proc.stdin.write(img.tobytes())
+            rms_val = rms[i] if i < len(rms) else 0.0
+
+            if args.style == "radial":
+                layer, spawn_points = draw_radial_layer(hi_w, hi_h, w, h, prev_bands, rms_val, symmetry=symmetry)
+            else:
+                layer, spawn_points = draw_bars_layer(hi_w, hi_h, w, h, prev_bands, rms_val)
+
+            if emoji_glyph is not None:
+                if args.emoji_beat == "kick":
+                    beat_val = float(kick_env[i]) if i < len(kick_env) else 0.0
+                elif args.emoji_beat == "rms":
+                    beat_val = rms_val
+                else:
+                    beat_val = 0.0
+                size_px = max(4, int(emoji_base_px * (1.0 + args.emoji_pulse * beat_val)))
+                sized = emoji_glyph.resize((size_px, size_px), Image.LANCZOS)
+                paste_x = w // 2 - size_px // 2
+                paste_y = h // 2 - size_px // 2
+                layer.paste(sized, (paste_x, paste_y), sized)
+
+            if particles is not None:
+                particles.spawn(spawn_points)
+                pdraw = ImageDraw.Draw(layer)
+                particles.update_and_draw(pdraw)
+
+            frame_img = compositor.composite(layer)
+
+            if beat_punch_on:
+                frame_img = apply_beat_punch(frame_img, float(punch_env[i]) if i < len(punch_env) else 0.0, args.punch_strength, w, h)
+
+            if args.title:
+                frame_img = draw_title(frame_img, args.title, font, w, h)
+
+            proc.stdin.write(frame_img.tobytes())
             if i % (args.fps * 5) == 0:
                 print(f"  {t:6.1f}s / {duration:.1f}s")
     finally:

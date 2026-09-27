@@ -286,6 +286,32 @@ dependencies (librosa, Pillow) and install with:
 pip3 install librosa pillow --break-system-packages
 ```
 
+The radial style has a stack of look/style options, all on by sensible
+defaults: anti-aliasing (`--supersample`), motion trails (`--trail-decay`,
+`--no-trails`), bloom/glow (`--glow-strength`, `--glow-radius`,
+`--no-glow`), particles at active bar tips (`--particles`,
+`--particle-rate`, `--max-particles`), a beat-reactive zoom on detected
+onsets (`--beat-punch`, `--punch-strength`), and kaleidoscope/mandala
+symmetry (`--symmetry N`, e.g. `--symmetry 6`). A center emoji that pulses
+with the kick drum is also available for the radial style:
+
+```bash
+python3 visualize_wav.py input.wav output.mp4 --format shorts --emoji "❤️"
+```
+
+`--emoji-beat` picks what drives its pulse size -- `kick` (default,
+bass-restricted onset detection so it responds to the kick drum rather
+than every hit), `rms` (overall loudness), or `off` (static size).
+`--emoji-size` and `--emoji-pulse` control base size and how much it grows
+on a hit. Rendering uses a system color-emoji font when one is available
+(Noto Color Emoji on Linux, Apple Color Emoji on macOS); a heart-like
+request (`"❤️"`, `"♥"`, `"heart"`) falls back to a hand-drawn glowing
+vector heart if no such font is found, so that case always works. Other
+emoji need a color font present on the machine running the script -- it
+warns and skips the emoji rather than failing if none is found.
+
+Run `python3 visualize_wav.py --help` for the full flag list and defaults.
+
 ## Layout
 
 - `process_field_wav.py` / `process_field_wav.sh` -- the main nature-ambience
