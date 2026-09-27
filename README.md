@@ -263,6 +263,29 @@ month from now you can see exactly what was applied to a given master.
 `--plan-only` prints what *would* run without actually invoking either
 (no heavy processing, no dependency check).
 
+## Audio visualization
+
+`visualize_wav.py` renders an audio-reactive visualization video from a WAV
+file -- a radial spectrum (bars pulsing outward from a center circle) or a
+classic bar-graph equalizer -- and muxes it with the original audio into a
+single mp4 via ffmpeg. Useful for turning a track into a YouTube Short/Reel
+or a longer landscape upload without a separate video editor.
+
+```bash
+python3 visualize_wav.py input.wav output.mp4 --format shorts --style radial --title "Track Name"
+python3 visualize_wav.py input.wav output.mp4 --format landscape --style bars
+```
+
+`--format` is `shorts` (1080x1920), `landscape` (1920x1080), or `square`
+(1080x1080). `--max-seconds N` renders only the first N seconds, useful for
+a quick preview before committing to a full render. This is optional and
+not wired into the main pipeline -- see requirements-optional.txt for its
+dependencies (librosa, Pillow) and install with:
+
+```bash
+pip3 install librosa pillow --break-system-packages
+```
+
 ## Layout
 
 - `process_field_wav.py` / `process_field_wav.sh` -- the main nature-ambience
@@ -276,6 +299,9 @@ month from now you can see exactly what was applied to a given master.
 - `remove_foreground.py` -- Demucs-based voice/foreground removal (optional,
   heavy; needs `torch` + `demucs`)
 - `batch_process.py` -- run the pipeline over a folder or CSV manifest
+- `visualize_wav.py` -- audio-reactive visualization video (radial or bar
+  spectrum), muxed with the source WAV into an mp4 (optional; needs
+  `librosa` + `pillow`)
 - `recipes.json` -- per-label EQ chains, loudness targets, loop policy,
   clean-run detector tuning
 - `requirements.txt` -- core Python dependencies (numpy/scipy)
