@@ -23,3 +23,13 @@ noisereduce>=3.0
 # dora-search.
 torch
 demucs
+
+# visualize_wav.py: audio-reactive visualization video (radial or bar
+# spectrum) rendered from a WAV and muxed with it into an mp4 via ffmpeg.
+# librosa does the mel-spectrogram/RMS analysis; Pillow draws the frames.
+# librosa pulls in numba/llvmlite as transitive deps, so this is a heavier
+# install than it looks -- expect a couple hundred MB. Tested against
+# librosa 0.11.0 / Pillow (current). Also requires the ffmpeg binary on
+# PATH (not a pip package).
+librosa>=0.10
+pillow>=10
