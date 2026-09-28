@@ -11,8 +11,8 @@ Pipeline:
      or bar-equalizer heights), an RMS envelope (drives a pulsing center
      circle / overall brightness), and an onset envelope (drives particle
      spawning and the beat-punch zoom).
-  2. Render each frame's new light (bars/circle, and for --symmetry>1 one
-     wedge rotated into N copies) onto a black Pillow layer at a
+  2. Render each frame's new light (bars/circle, glowburst rays/core/rings,
+     and for --symmetry>1 one wedge rotated into N copies) onto a black Pillow layer at a
      supersampled resolution, then downsample that layer once to the
      target resolution with the BOX filter (exact area averaging -- clean,
      fast anti-aliasing for an integer supersample factor, unlike Pillow's
@@ -35,9 +35,18 @@ Pipeline:
 Usage:
   python3 visualize_wav.py input.wav output.mp4 --format shorts --style radial
   python3 visualize_wav.py input.wav output.mp4 --format landscape --style bars
+  python3 visualize_wav.py input.wav output.mp4 --format landscape --style glowburst
   python3 visualize_wav.py input.wav output.mp4 --format shorts --title "Contemplation"
   python3 visualize_wav.py input.wav output.mp4 --format shorts --symmetry 6
   python3 visualize_wav.py input.wav output.mp4 --format shorts --no-particles --no-beat-punch --symmetry 1
+
+Styles:
+  radial     spectrum bars pulsing outward from a center ring (default)
+  bars       classic bar-graph equalizer
+  glowburst  sunburst -- a soft glowing core that breathes with loudness,
+             mirrored tapered light rays sized by band energy, and
+             expanding rings on onsets; suits slow/beatless ambient
+             material (--symmetry and --emoji are radial-only)
 
 Formats:
   shorts     1080x1920 (9:16, YouTube Shorts / Reels / TikTok)
@@ -421,6 +430,118 @@ def draw_bars_layer(hi_w, hi_h, out_w, out_h, bands, rms_val, symmetry=1):
     return out_img, spawn_points
 
 
+def glowburst_ray_color(frac, amp):
+    """Warm sunrise ramp by frequency: amber/gold lows through rose to a
+    soft violet at the top, brighter and slightly less saturated as a band
+    gets louder so peaks read as hot-white-ish rather than just longer."""
+    hue = (0.12 - 0.30 * frac) % 1.0
+    return hsv_to_rgb(hue, 0.75 - 0.25 * min(1.0, amp), 0.55 + 0.45 * min(1.0, amp))
+
+
+class BurstRings:
+    """Expanding shockwave rings launched from the glow core on detected
+    onsets -- the "burst" in glowburst. Each ring is [radius_frac, alpha];
+    radius is a fraction of min(w,h) so the same state draws correctly at
+    supersampled and output resolution."""
+
+    def __init__(self, fps, max_rings=8, min_gap_s=1.5):
+        self.fps = fps
+        self.max_rings = max_rings
+        # onset detection fires ~2x/sec even on beatless pads; a minimum gap
+        # keeps the rings reading as occasional swells, not a ripple tank
+        self.min_gap = int(min_gap_s * fps)
+        self.since_last = self.min_gap
+        self.rings = []
+
+    def update(self, onset, core_frac):
+        # onset is the punch envelope, which is exactly 1.0 on a detected
+        # onset frame and decays after -- launch only on the onset itself
+        self.since_last += 1
+        if onset >= 0.999 and self.since_last >= self.min_gap and len(self.rings) < self.max_rings:
+            self.rings.append([core_frac, 1.0])
+            self.since_last = 0
+        alive = []
+        for r, a in self.rings:
+            r += 0.35 / self.fps
+            a *= 0.94
+            if a > 0.03 and r < 0.75:
+                alive.append([r, a])
+        self.rings = alive
+
+    def draw(self, draw, cx, cy, scale):
+        for r, a in self.rings:
+            rad = r * scale
+            color = hsv_to_rgb(0.09, 0.45, a)
+            draw.ellipse(
+                [cx - rad, cy - rad, cx + rad, cy + rad],
+                outline=color,
+                width=max(2, int(scale * 0.004 * (0.5 + a))),
+            )
+
+
+_glow_dist_cache = {}
+
+
+def glow_core(out_w, out_h, radius_frac, intensity):
+    """Soft Gaussian sun at the center, as a float32 RGB array at output
+    resolution. The normalized distance map is computed once per frame size
+    and cached -- per frame it's just an exp and a multiply."""
+    key = (out_w, out_h)
+    d2 = _glow_dist_cache.get(key)
+    if d2 is None:
+        yy, xx = np.mgrid[0:out_h, 0:out_w].astype(np.float32)
+        s = float(min(out_w, out_h))
+        d2 = ((xx - out_w / 2) ** 2 + (yy - out_h / 2) ** 2) / (s * s)
+        _glow_dist_cache[key] = d2
+    falloff = np.exp(-d2 / (radius_frac * radius_frac)) * intensity
+    warm = np.array([255.0, 214.0, 150.0], dtype=np.float32)
+    return falloff[..., None] * warm
+
+
+def draw_glowburst_layer(hi_w, hi_h, out_w, out_h, bands, rms_val, t=0.0, bursts=None):
+    """Sunburst: a soft glowing core whose size/brightness follows RMS,
+    tapered light rays radiating from it (length = band amplitude, mirrored
+    left/right so the burst is symmetric, slowly rotating), and expanding
+    rings on onsets (see BurstRings). Designed for slow, beatless material
+    -- ambient pads read as a breathing sun rather than a twitchy meter."""
+    img = Image.new("RGB", (hi_w, hi_h), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    cx, cy = hi_w / 2, hi_h / 2
+    s = min(hi_w, hi_h)
+    n = len(bands)
+    core_frac = 0.05 * (1 + 0.4 * rms_val)
+    r0 = s * core_frac * 0.8
+    max_len = s * 0.30  # keeps peak rays clear of the title line
+    rot = t * 0.04  # radians/sec -- barely-there drift
+    half_w = math.pi / n * 0.55  # angular half-width of each ray at its base
+
+    tips = []
+    for i, amp in enumerate(bands):
+        frac = i / max(1, n - 1)
+        color = glowburst_ray_color(frac, amp)
+        length = max_len * (0.05 + float(amp) ** 1.4)
+        for side in (1, -1):
+            a = rot - math.pi / 2 + side * (frac * math.pi + half_w)
+            r1 = r0 + length
+            base_l = (cx + r0 * math.cos(a - half_w), cy + r0 * math.sin(a - half_w))
+            base_r = (cx + r0 * math.cos(a + half_w), cy + r0 * math.sin(a + half_w))
+            tip = (cx + r1 * math.cos(a), cy + r1 * math.sin(a))
+            draw.polygon([base_l, tip, base_r], fill=color)
+            tips.append((tip[0], tip[1], color, float(amp)))
+
+    if bursts is not None:
+        bursts.draw(draw, cx, cy, s)
+
+    out_img = img.resize((out_w, out_h), Image.BOX) if (hi_w, hi_h) != (out_w, out_h) else img
+    core = glow_core(out_w, out_h, core_frac, 0.3 + 0.35 * rms_val)
+    layer = np.minimum(np.asarray(out_img, dtype=np.float32) + core, 255.0)
+    out_img = Image.fromarray(layer.astype(np.uint8), mode="RGB")
+
+    ss_x, ss_y = hi_w / out_w, hi_h / out_h
+    spawn_points = [(x / ss_x, y / ss_y, c, a) for x, y, c, a in tips]
+    return out_img, spawn_points
+
+
 class ParticleSystem:
     """Small drifting sparks spawned at active bar tips. Cheap Python-object
     list rather than numpy arrays -- particle counts here (a few hundred at
@@ -530,7 +651,7 @@ def main():
     ap.add_argument("wav_path")
     ap.add_argument("out_path")
     ap.add_argument("--format", choices=FORMATS.keys(), default="shorts")
-    ap.add_argument("--style", choices=["radial", "bars"], default="radial")
+    ap.add_argument("--style", choices=["radial", "bars", "glowburst"], default="radial")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--bands", type=int, default=48)
     ap.add_argument("--title", default=None)
@@ -568,7 +689,7 @@ def main():
     beat_punch_on = not args.no_beat_punch
     symmetry = max(1, args.symmetry)
     if symmetry > 1 and args.style != "radial":
-        print("Note: --symmetry only applies to --style radial; ignoring for bars.", file=sys.stderr)
+        print(f"Note: --symmetry only applies to --style radial; ignoring for {args.style}.", file=sys.stderr)
         symmetry = 1
 
     print(f"Loading audio and computing features ({args.bands} bands @ {args.fps}fps)...")
@@ -579,14 +700,24 @@ def main():
     if args.max_seconds:
         n_frames = min(n_frames, int(args.max_seconds * args.fps))
 
+    if args.style == "glowburst":
+        # rescale each band to its own 2nd-98th percentile range: mel_db is
+        # normalized against the whole spectrogram, so on dark material
+        # (pads, ambience) the upper bands sit near zero all track long and
+        # the burst collapses to a narrow cone of bass rays
+        lo = np.percentile(mel_db, 2, axis=1, keepdims=True)
+        hi = np.percentile(mel_db, 98, axis=1, keepdims=True)
+        mel_db = np.clip((mel_db - lo) / np.maximum(hi - lo, 1e-6), 0.0, 1.0)
+
     font = load_font(int(h * 0.03))
     compositor = FrameCompositor(w, h, trail_decay, glow_strength, glow_radius)
     particles = ParticleSystem(args.max_particles, args.particle_rate, args.fps) if particles_on else None
+    bursts = BurstRings(args.fps) if args.style == "glowburst" else None
 
     emoji_glyph = None
     if args.emoji:
         if args.style != "radial":
-            print("Note: --emoji only applies to --style radial; ignoring for bars.", file=sys.stderr)
+            print(f"Note: --emoji only applies to --style radial; ignoring for {args.style}.", file=sys.stderr)
         else:
             emoji_glyph = get_emoji_glyph(args.emoji)
             if emoji_glyph is None:
@@ -625,6 +756,9 @@ def main():
 
             if args.style == "radial":
                 layer, spawn_points = draw_radial_layer(hi_w, hi_h, w, h, prev_bands, rms_val, symmetry=symmetry)
+            elif args.style == "glowburst":
+                bursts.update(float(punch_env[i]) if i < len(punch_env) else 0.0, 0.05 * (1 + 0.4 * rms_val))
+                layer, spawn_points = draw_glowburst_layer(hi_w, hi_h, w, h, prev_bands, rms_val, t=t, bursts=bursts)
             else:
                 layer, spawn_points = draw_bars_layer(hi_w, hi_h, w, h, prev_bands, rms_val)
 
