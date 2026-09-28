@@ -266,14 +266,27 @@ month from now you can see exactly what was applied to a given master.
 ## Audio visualization
 
 `visualize_wav.py` renders an audio-reactive visualization video from a WAV
-file -- a radial spectrum (bars pulsing outward from a center circle) or a
-classic bar-graph equalizer -- and muxes it with the original audio into a
+file -- a radial spectrum (bars pulsing outward from a center circle), a
+classic bar-graph equalizer, or a `glowburst` sunburst for ambient
+material -- and muxes it with the original audio into a
 single mp4 via ffmpeg. Useful for turning a track into a YouTube Short/Reel
 or a longer landscape upload without a separate video editor.
 
 ```bash
 python3 visualize_wav.py input.wav output.mp4 --format shorts --style radial --title "Track Name"
 python3 visualize_wav.py input.wav output.mp4 --format landscape --style bars
+```
+
+A third style, `glowburst`, is built for slow or beatless material (ambient
+pads, drones) where spectrum bars just twitch. It draws a soft sun-like core
+that breathes with loudness, tapered rays mirrored left/right in a
+gold-to-violet sunrise ramp, and occasional shockwave rings on onsets (at
+most one every 1.5s). Each band is rescaled to its own 2nd-98th percentile
+range, so a dark mix with little treble still fills the whole burst instead
+of collapsing to a cone of bass rays:
+
+```bash
+python3 visualize_wav.py track.wav out.mp4 --format landscape --style glowburst --title "Peaceful Sunrise"
 ```
 
 `--format` is `shorts` (1080x1920), `landscape` (1920x1080), or `square`
@@ -325,8 +338,8 @@ Run `python3 visualize_wav.py --help` for the full flag list and defaults.
 - `remove_foreground.py` -- Demucs-based voice/foreground removal (optional,
   heavy; needs `torch` + `demucs`)
 - `batch_process.py` -- run the pipeline over a folder or CSV manifest
-- `visualize_wav.py` -- audio-reactive visualization video (radial or bar
-  spectrum), muxed with the source WAV into an mp4 (optional; needs
+- `visualize_wav.py` -- audio-reactive visualization video (radial, bar,
+  or glowburst), muxed with the source WAV into an mp4 (optional; needs
   `librosa` + `pillow`)
 - `recipes.json` -- per-label EQ chains, loudness targets, loop policy,
   clean-run detector tuning
