@@ -267,8 +267,8 @@ month from now you can see exactly what was applied to a given master.
 
 `visualize_wav.py` renders an audio-reactive visualization video from a WAV
 file -- a radial spectrum (bars pulsing outward from a center circle), a
-classic bar-graph equalizer, or a `glowburst` sunburst for ambient
-material -- and muxes it with the original audio into a
+classic bar-graph equalizer, or, for ambient material, a `glowburst`
+sunburst or a `wormhole` tunnel -- and muxes it with the original audio into a
 single mp4 via ffmpeg. Useful for turning a track into a YouTube Short/Reel
 or a longer landscape upload without a separate video editor.
 
@@ -287,6 +287,16 @@ of collapsing to a cone of bass rays:
 
 ```bash
 python3 visualize_wav.py track.wav out.mp4 --format landscape --style glowburst --title "Peaceful Sunrise"
+```
+
+`wormhole` flies you down a tunnel of rings. Each ring's outline is pushed
+out by the spectrum and twists with depth, so bumps spiral down the tunnel,
+and the tunnel slowly curves. Travel speed follows loudness and surges on
+onsets, so a swell feels like acceleration. It uses the same per-band
+rescaling as `glowburst`:
+
+```bash
+python3 visualize_wav.py track.wav out.mp4 --format landscape --style wormhole --title "Peaceful Sunrise"
 ```
 
 `--format` is `shorts` (1080x1920), `landscape` (1920x1080), or `square`
@@ -339,7 +349,7 @@ Run `python3 visualize_wav.py --help` for the full flag list and defaults.
   heavy; needs `torch` + `demucs`)
 - `batch_process.py` -- run the pipeline over a folder or CSV manifest
 - `visualize_wav.py` -- audio-reactive visualization video (radial, bar,
-  or glowburst), muxed with the source WAV into an mp4 (optional; needs
+  glowburst, or wormhole), muxed with the source WAV into an mp4 (optional; needs
   `librosa` + `pillow`)
 - `recipes.json` -- per-label EQ chains, loudness targets, loop policy,
   clean-run detector tuning
