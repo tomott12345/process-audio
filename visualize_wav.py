@@ -12,6 +12,7 @@ Pipeline:
      circle / overall brightness), and an onset envelope (drives particle
      spawning and the beat-punch zoom).
   2. Render each frame's new light (bars/circle, glowburst rays/core/rings,
+     wormhole tunnel rings,
      and for --symmetry>1 one wedge rotated into N copies) onto a black Pillow layer at a
      supersampled resolution, then downsample that layer once to the
      target resolution with the BOX filter (exact area averaging -- clean,
@@ -36,9 +37,13 @@ Usage:
   python3 visualize_wav.py input.wav output.mp4 --format shorts --style radial
   python3 visualize_wav.py input.wav output.mp4 --format landscape --style bars
   python3 visualize_wav.py input.wav output.mp4 --format landscape --style glowburst
+  python3 visualize_wav.py input.wav output.mp4 --format landscape --style wormhole
   python3 visualize_wav.py input.wav output.mp4 --format shorts --title "Contemplation"
   python3 visualize_wav.py input.wav output.mp4 --format shorts --symmetry 6
   python3 visualize_wav.py input.wav output.mp4 --format shorts --no-particles --no-beat-punch --symmetry 1
+  python3 visualize_wav.py master.wav output.mp4 --format landscape --grid music_analysis.json
+    (--grid: lock beat punch / emoji pulse to a music_analyze.py beat grid
+    and flash on drops; see release.py for the one-command music flow)
 
 Styles:
   radial     spectrum bars pulsing outward from a center ring (default)
@@ -46,7 +51,11 @@ Styles:
   glowburst  sunburst -- a soft glowing core that breathes with loudness,
              mirrored tapered light rays sized by band energy, and
              expanding rings on onsets; suits slow/beatless ambient
-             material (--symmetry and --emoji are radial-only)
+             material
+  wormhole   a tunnel of spectrum-shaped rings flying toward the viewer,
+             curving and twisting with depth; travel speed follows
+             loudness and surges on onsets
+  (--symmetry and --emoji are radial-only)
 
 Formats:
   shorts     1080x1920 (9:16, YouTube Shorts / Reels / TikTok)
@@ -112,6 +121,54 @@ def build_pulse_envelope(onset_frames, n_frames, decay=0.72):
     for i in range(1, n_frames):
         env[i] = max(env[i], env[i - 1] * decay)
     return env
+
+
+def grid_envelopes(grid_path, n_frames, fps):
+    """Beat-locked replacements for the onset-detected envelopes, from a
+    music_analysis.json / clip_*_grid.json (music_analyze.py, pick_clip.py).
+    Onset detection jitters on busy trap hats and psy 16th-note basslines;
+    the analyzed grid doesn't. Returns (punch_env, kick_env, flash_env) or
+    None when the file has no beat grid (ambient) -- the caller then keeps
+    onset detection.
+
+    punch: a pulse on every beat (downbeats 1.0, other beats 0.6), scaled by
+    section -- full in drops, calmer in intros/breakdowns. kick: the same
+    beats with a slower decay (drives the emoji). flash: a white flash on
+    each drop's first downbeat."""
+    import json
+
+    with open(grid_path) as f:
+        a = json.load(f)
+    if not a.get("tempo", {}).get("has_grid"):
+        return None
+    g = a["grid"]
+    downs = set(round(t, 3) for t in g.get("downbeats", []))
+    scale = {"drop": 1.0, "build": 0.85, "groove": 0.75, "intro": 0.6, "outro": 0.6, "breakdown": 0.35}
+
+    def section_scale(t):
+        for sec in a.get("sections", []):
+            if sec["start"] <= t < sec["end"]:
+                return scale.get(sec["label"], 0.7)
+        return 0.7
+
+    def pulses(times, amps, decay):
+        env = np.zeros(n_frames, dtype=np.float32)
+        for t, amp in zip(times, amps):
+            fi = int(round(t * fps))
+            if 0 <= fi < n_frames:
+                env[fi] = max(env[fi], amp)
+        for i in range(1, n_frames):
+            env[i] = max(env[i], env[i - 1] * decay)
+        return env
+
+    beats = g.get("beats", [])
+    amps = [(1.0 if round(t, 3) in downs else 0.6) * section_scale(t) for t in beats]
+    punch = pulses(beats, amps, 0.72)
+    kick = pulses(beats, [min(1.0, x / 0.85) for x in amps], 0.8)
+    flash = pulses(a.get("drops", []), [1.0] * len(a.get("drops", [])), 0.85)
+    # the drop hit itself gets a bigger zoom than an ordinary downbeat
+    punch = np.maximum(punch, 1.6 * flash)
+    return punch, kick, flash
 
 
 def load_features(wav_path, fps, n_bands=48, sr_target=22050, kick_fmax=200.0):
@@ -542,6 +599,114 @@ def draw_glowburst_layer(hi_w, hi_h, out_w, out_h, bands, rms_val, t=0.0, bursts
     return out_img, spawn_points
 
 
+class WormholeTunnel:
+    """Travel state for the wormhole style: how far we've flown down the
+    tunnel (phase, in ring-spacing units) and the clock that bends it.
+    Speed follows loudness plus a kick on onsets, so swells feel like
+    acceleration rather than just brighter rings."""
+
+    def __init__(self, fps, n_rings=20):
+        self.fps = fps
+        self.n_rings = n_rings
+        self.phase = 0.0
+
+    def advance(self, rms_val, punch):
+        speed = 0.5 + 2.2 * rms_val + 2.5 * punch  # rings/sec
+        self.phase += speed / self.fps
+
+
+def draw_wormhole_layer(hi_w, hi_h, out_w, out_h, bands, rms_val, t=0.0, tunnel=None):
+    """Wormhole: concentric rings receding to a vanishing point, flying
+    toward the viewer. Each ring is a closed polygon whose radius is pushed
+    out by the spectrum (bands mirrored around the circumference, twisted
+    with depth so bumps spiral down the tunnel); ring centers drift with
+    depth so the tunnel curves. Rings keep a stable hue as they approach
+    (keyed to ring identity, not screen slot), and fade out both far away
+    and right before they pass the camera."""
+    img = Image.new("RGB", (hi_w, hi_h), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    cx0, cy0 = hi_w / 2, hi_h / 2
+    s = min(hi_w, hi_h)
+    n = len(bands)
+    n_rings = tunnel.n_rings if tunnel else 20
+    phase = tunnel.phase if tunnel else t
+    frac_phase = phase % 1.0
+    base_id = int(phase)
+    r_scale = s * 0.16
+    n_pts = 96
+    bend = s * 0.05
+
+    # mirrored spectrum around the ring: angle 0 (top) = lows, bottom = highs
+    ring_amp = np.empty(n_pts)
+    for j in range(n_pts):
+        f = abs(((j / n_pts) * 2.0) - 1.0)  # 1 at top, 0 at bottom, 1 at top again
+        ring_amp[j] = bands[min(n - 1, int((1.0 - f) * (n - 1)))]
+    # circular smoothing -- raw per-band steps make the rings look jagged
+    kern = np.hanning(9)
+    kern /= kern.sum()
+    ring_amp = np.convolve(np.concatenate([ring_amp[-4:], ring_amp, ring_amp[:4]]), kern, mode="valid")
+
+    rings = []
+    for k in range(n_rings):
+        z = k + 1.0 - frac_phase  # depth; shrinks as we fly forward
+        if z < 0.35:
+            continue
+        r = r_scale / z
+        if r < 2:
+            continue
+        ring_id = base_id + n_rings - k  # stable identity as the ring approaches
+        depth_frac = z / n_rings
+        # far rings bend away from center more -> curved tunnel; sqrt so
+        # the bend is spread along the tunnel instead of whipping the tail
+        ox = bend * math.sqrt(depth_frac) * math.sin(0.23 * t + 0.12 * z)
+        oy = bend * math.sqrt(depth_frac) * math.cos(0.17 * t + 0.10 * z)
+        cx, cy = cx0 + ox, cy0 + oy
+        twist = 0.18 * z + 0.15 * t
+        bump = 0.22 / (1.0 + 0.15 * z)
+        bright = max(0.0, 1.0 - depth_frac) * min(1.0, (z - 0.35) / 0.8)
+        if bright <= 0.02:
+            continue
+        hue = (0.55 + 0.28 * ((ring_id * 0.071) % 1.0)) % 1.0
+        color = hsv_to_rgb(hue, 0.7, bright * (0.55 + 0.45 * rms_val))
+        width = max(1, min(int(s * 0.007), int(s * 0.0022 / z) + 1))
+        pts = []
+        for j in range(n_pts):
+            th = twist + 2 * math.pi * j / n_pts - math.pi / 2
+            rr = r * (1.0 + bump * float(ring_amp[j]))
+            pts.append((cx + rr * math.cos(th), cy + rr * math.sin(th)))
+        rings.append((z, pts, color, width, cx, cy, bright))
+
+    # far to near, so near rings draw over the far ones
+    rings.sort(key=lambda rg: -rg[0])
+    prev_pts = None
+    for z, pts, color, width, cx, cy, _ in rings:
+        draw.line(pts + [pts[0]], fill=color, width=width, joint="curve")
+        # tunnel "struts": short lines linking matching points on adjacent rings
+        if prev_pts is not None:
+            dim = tuple(c // 3 for c in color)
+            for j in range(0, n_pts, 12):
+                draw.line([prev_pts[j], pts[j]], fill=dim, width=max(1, width // 2))
+        prev_pts = pts
+
+    # the light at the end of the tunnel -- anchored to the farthest ring
+    # that's actually visible, so it sits where the eye reads the tunnel end
+    visible = [rg for rg in rings if rg[6] > 0.2]
+    if visible:
+        fx, fy = visible[0][4], visible[0][5]
+        glow_r = s * (0.006 + 0.012 * rms_val)
+        draw.ellipse([fx - glow_r, fy - glow_r, fx + glow_r, fy + glow_r], fill=(235, 225, 255))
+
+    out_img = img.resize((out_w, out_h), Image.BOX) if (hi_w, hi_h) != (out_w, out_h) else img
+    ss_x, ss_y = hi_w / out_w, hi_h / out_h
+    spawn_points = []
+    if rings:
+        # sparks peel off the nearest ring at its loudest points
+        _, pts, color, _, _, _, _ = rings[-1]
+        for j in range(0, n_pts, 8):
+            spawn_points.append((pts[j][0] / ss_x, pts[j][1] / ss_y, color, float(ring_amp[j])))
+    return out_img, spawn_points
+
+
 class ParticleSystem:
     """Small drifting sparks spawned at active bar tips. Cheap Python-object
     list rather than numpy arrays -- particle counts here (a few hundred at
@@ -651,7 +816,7 @@ def main():
     ap.add_argument("wav_path")
     ap.add_argument("out_path")
     ap.add_argument("--format", choices=FORMATS.keys(), default="shorts")
-    ap.add_argument("--style", choices=["radial", "bars", "glowburst"], default="radial")
+    ap.add_argument("--style", choices=["radial", "bars", "glowburst", "wormhole"], default="radial")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--bands", type=int, default=48)
     ap.add_argument("--title", default=None)
@@ -673,6 +838,7 @@ def main():
     ap.add_argument("--emoji-size", type=float, default=0.22, help="base emoji size as a fraction of min(width,height) (default 0.22)")
     ap.add_argument("--emoji-pulse", type=float, default=0.5, help="extra size fraction at peak beat strength (default 0.5, i.e. up to +50%% on a hard hit)")
     ap.add_argument("--kick-fmax", type=float, default=200.0, help="Hz cutoff for what counts as 'kick drum' when --emoji-beat kick (default 200)")
+    ap.add_argument("--grid", default=None, help="music_analysis.json (or a pick_clip.py clip_*_grid.json) for THIS audio: lock beat punch / emoji pulse to the analyzed beat grid and flash on drops. Falls back to onset detection when the file has no grid (ambient).")
     args = ap.parse_args()
 
     if shutil.which("ffmpeg") is None:
@@ -697,10 +863,19 @@ def main():
         args.wav_path, args.fps, args.bands, kick_fmax=args.kick_fmax
     )
 
+    flash_env = None
+    if args.grid:
+        envs = grid_envelopes(args.grid, n_frames, args.fps)
+        if envs is None:
+            print(f"Note: {args.grid} has no beat grid (beatless track) -- keeping onset detection.", file=sys.stderr)
+        else:
+            punch_env, kick_env, flash_env = envs
+            print(f"Beat-locked to {args.grid}")
+
     if args.max_seconds:
         n_frames = min(n_frames, int(args.max_seconds * args.fps))
 
-    if args.style == "glowburst":
+    if args.style in ("glowburst", "wormhole"):
         # rescale each band to its own 2nd-98th percentile range: mel_db is
         # normalized against the whole spectrogram, so on dark material
         # (pads, ambience) the upper bands sit near zero all track long and
@@ -713,6 +888,7 @@ def main():
     compositor = FrameCompositor(w, h, trail_decay, glow_strength, glow_radius)
     particles = ParticleSystem(args.max_particles, args.particle_rate, args.fps) if particles_on else None
     bursts = BurstRings(args.fps) if args.style == "glowburst" else None
+    tunnel = WormholeTunnel(args.fps) if args.style == "wormhole" else None
 
     emoji_glyph = None
     if args.emoji:
@@ -734,7 +910,11 @@ def main():
         "-i", "-",
         "-i", args.wav_path,
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "20",
-        "-c:a", "aac", "-b:a", "192k",
+        "-r", str(args.fps),
+        # upload-safe: 48k/320k AAC (YouTube and Instagram both re-encode,
+        # so start from the best source), moov atom up front for streaming
+        "-c:a", "aac", "-b:a", "320k", "-ar", "48000",
+        "-movflags", "+faststart",
         "-shortest",
         args.out_path,
     ]
@@ -756,6 +936,9 @@ def main():
 
             if args.style == "radial":
                 layer, spawn_points = draw_radial_layer(hi_w, hi_h, w, h, prev_bands, rms_val, symmetry=symmetry)
+            elif args.style == "wormhole":
+                tunnel.advance(rms_val, float(punch_env[i]) if i < len(punch_env) else 0.0)
+                layer, spawn_points = draw_wormhole_layer(hi_w, hi_h, w, h, prev_bands, rms_val, t=t, tunnel=tunnel)
             elif args.style == "glowburst":
                 bursts.update(float(punch_env[i]) if i < len(punch_env) else 0.0, 0.05 * (1 + 0.4 * rms_val))
                 layer, spawn_points = draw_glowburst_layer(hi_w, hi_h, w, h, prev_bands, rms_val, t=t, bursts=bursts)
@@ -784,6 +967,9 @@ def main():
 
             if beat_punch_on:
                 frame_img = apply_beat_punch(frame_img, float(punch_env[i]) if i < len(punch_env) else 0.0, args.punch_strength, w, h)
+
+            if flash_env is not None and i < len(flash_env) and flash_env[i] > 0.02:
+                frame_img = Image.blend(frame_img, Image.new("RGB", (w, h), (255, 255, 255)), 0.35 * float(flash_env[i]))
 
             if args.title:
                 frame_img = draw_title(frame_img, args.title, font, w, h)

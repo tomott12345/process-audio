@@ -165,6 +165,97 @@ recording and truncates the file there). `--silence-threshold` (default
 
 `--plan-only` prints the resolved chain and targets without rendering.
 
+## Music: mastering and releasing tracks (EDM / DAWless)
+
+A third, separate pipeline for finished tracks -- built around a
+1010music Bluebox mix of hardware synths, in ambient, trap, techno, and
+psytrance, released on YouTube and Instagram. It's not a mode of the
+nature or speech scripts: it knows about tempo, bars, key, drops, and
+club-style mastering, which neither of those does. See
+`MUSIC_FEATURES_PLAN.md` for the full roadmap; this is milestone 1.
+
+One command, mix in, upload-ready files out:
+
+```bash
+python3 release.py bluebox_mix.wav --genre techno --title "Night Drive" --artist "Thomas Ott"
+```
+
+That masters the mix, picks a Short/Reel excerpt around the drop, renders
+a beat-locked full-length 16:9 video and a 9:16 Short/Reel (`--square` adds
+a 1:1 feed post), and writes `captions.txt`. Rendering video is the slow
+part -- add `--max-seconds 20` for a quick preview of both videos first,
+or `--no-landscape` to skip the full-length one. Each step is one of the
+scripts below, run as-is, so any of it can be redone by hand.
+
+`--genre` is required and never guessed (`ambient | trap | techno |
+psytrance`): it sets the tempo range, the EQ/dynamics recipe, and the
+default visual style, all in `music_recipes.json`. Every genre recipe is
+marked `"untested": true` until it's been A/B'd against real Bluebox mixes.
+
+**`music_analyze.py`** -- read-only analysis, written to
+`music_analysis.json` (`--png` adds a one-page chart; needs matplotlib):
+
+- tempo and a beat/bar grid, by a constant-tempo comb search inside the
+  genre's range (hardware on one clock doesn't drift). Searching only in
+  range is what keeps trap at its ~70 BPM half-time feel instead of 140;
+  the double-time grid is kept internally for visual sync. The grid is
+  snapped to where the kick attacks actually start in the waveform, so
+  bar cuts don't clip them. Ambient usually has no steady beat and is
+  reported as "no grid" -- everything downstream then works in seconds.
+- key, in standard and Camelot notation (chroma from C3 up, so a saw
+  bass's overtones don't turn minor keys major); a low-confidence key is
+  flagged as a guess
+- loudness (integrated, LRA, true peak, PLR), DC offset, clipped samples
+- stereo checks: correlation below the genre's mono-bass crossover and
+  mono-sum loss
+- a phone-speaker check: how much the mix loses below ~150 Hz, and whether
+  the bass is close to a pure sine (it then vanishes on a phone -- the fix
+  is harmonics on the bass, not more low end)
+- sections (intro / build / drop / breakdown / outro; quiet / swell / peak
+  for ambient) and the main drop. Labels are heuristic -- `pick_clip.py`
+  shows its reasoning and takes an override.
+
+**`process_music_wav.py`** -- the mastering chain: subsonic high-pass (also
+removes DC) -> mono-bass below the genre crossover (optional `--width` only
+ever above it) -> tonal EQ -> optional dynamic EQ -> glue compression ->
+static gain to the loudness target -> tanh soft-clip -> true-peak limiter
+(both at 4x the sample rate, band-limited before the limiter so the
+downsample doesn't overshoot) -> fades. It re-measures and corrects until
+it lands within 0.3 LU of the target and under the true-peak ceiling. This
+deliberately doesn't use `loudnorm`: its dynamic mode pumps on music, and
+its linear mode silently falls back to dynamic whenever the needed gain
+would exceed the true-peak ceiling -- every EDM master. Outputs
+`master_24bit_48k.wav` and a triangular-dithered `master_16bit_44k1.wav`,
+tagged with title/artist/genre and BPM/key, plus a `REPORT.txt` with
+before/after QC.
+
+```bash
+python3 process_music_wav.py mix.wav --genre trap --preset instagram --start 0:12 --end 3:40
+```
+
+`--preset` is `youtube` (-14 LUFS, -1 dBTP) or `instagram` (treated the
+same until measured -- Instagram publishes no target; upload a private test
+Reel, download it back, and run `music_analyze.py` on it). Ambient lands
+2 LU under the preset on purpose and skips the soft-clipper.
+
+**`pick_clip.py`** -- cuts the Short/Reel: a whole number of bars no longer
+than `--length` (default 30s), starting 1-4 bars before the main drop so
+the build lands in the clip, fading over the last bar. `--loop` cuts an
+exact 4/8/16-bar phrase starting on the drop with 2 ms edge fades, so the
+platform's auto-repeat seams on a downbeat. `--drop-at` / `--start`
+override the choice; `--plan-only` explains it without cutting. Ambient
+gets the highest-energy window with slow fades. Platform length caps
+change often -- check current limits; nothing here enforces one.
+
+**`visualize_wav.py --grid music_analysis.json`** locks beat punch and the
+emoji pulse to the analyzed grid (downbeats accented, calmer in
+intros/breakdowns) and flashes on each drop; with no grid (ambient) it
+keeps onset detection. Videos now encode 48k / 320k AAC with `+faststart`.
+
+These need `librosa` (the visualizer's optional dependency) plus the core
+numpy/scipy; see `requirements-optional.txt`. Analysis decodes the whole
+file at 22.05 kHz -- about 480 MB of RAM for a 45-minute stereo jam.
+
 ## Removing unwanted noise or a voice/foreground
 
 Two optional, narrower alternatives to full "stem isolation" (which isn't
@@ -267,8 +358,8 @@ month from now you can see exactly what was applied to a given master.
 
 `visualize_wav.py` renders an audio-reactive visualization video from a WAV
 file -- a radial spectrum (bars pulsing outward from a center circle), a
-classic bar-graph equalizer, or a `glowburst` sunburst for ambient
-material -- and muxes it with the original audio into a
+classic bar-graph equalizer, or, for ambient material, a `glowburst`
+sunburst or a `wormhole` tunnel -- and muxes it with the original audio into a
 single mp4 via ffmpeg. Useful for turning a track into a YouTube Short/Reel
 or a longer landscape upload without a separate video editor.
 
@@ -287,6 +378,16 @@ of collapsing to a cone of bass rays:
 
 ```bash
 python3 visualize_wav.py track.wav out.mp4 --format landscape --style glowburst --title "Peaceful Sunrise"
+```
+
+`wormhole` flies you down a tunnel of rings. Each ring's outline is pushed
+out by the spectrum and twists with depth, so bumps spiral down the tunnel,
+and the tunnel slowly curves. Travel speed follows loudness and surges on
+onsets, so a swell feels like acceleration. It uses the same per-band
+rescaling as `glowburst`:
+
+```bash
+python3 visualize_wav.py track.wav out.mp4 --format landscape --style wormhole --title "Peaceful Sunrise"
 ```
 
 `--format` is `shorts` (1080x1920), `landscape` (1920x1080), or `square`
@@ -339,8 +440,17 @@ Run `python3 visualize_wav.py --help` for the full flag list and defaults.
   heavy; needs `torch` + `demucs`)
 - `batch_process.py` -- run the pipeline over a folder or CSV manifest
 - `visualize_wav.py` -- audio-reactive visualization video (radial, bar,
-  or glowburst), muxed with the source WAV into an mp4 (optional; needs
+  glowburst, or wormhole), muxed with the source WAV into an mp4 (optional; needs
   `librosa` + `pillow`)
+- `release.py` -- music: one command from a Bluebox mix to mastered audio,
+  a beat-locked YouTube video, a Short/Reel, and captions
+- `music_analyze.py` -- music: tempo/grid, key (Camelot), loudness,
+  stereo/phone checks, sections and the main drop
+- `process_music_wav.py` -- music: genre-recipe mastering chain for
+  YouTube/Instagram
+- `pick_clip.py` -- music: bar-aligned Short/Reel excerpt (or seamless loop)
+- `music_common.py` -- shared helpers for the music scripts
+- `music_recipes.json` -- music: per-genre recipes and loudness presets
 - `recipes.json` -- per-label EQ chains, loudness targets, loop policy,
   clean-run detector tuning
 - `requirements.txt` -- core Python dependencies (numpy/scipy)
