@@ -20,6 +20,11 @@ at startup if a label is missing a required key rather than silently
 reusing another label's recipe. --plan-only prints the chosen bed, EQ
 chain, and loudness targets without rendering anything, useful before
 committing to a long render.
+
+--formats picks the audio deliverables for each master (wav24, wav16,
+flac, mp3; default wav24 -- the master_long.wav / master_short.wav this
+script has always written). --plan-only --json prints the plan as JSON;
+--progress-json emits machine-readable progress (see pipeline_io.py).
 """
 
 from __future__ import annotations
@@ -35,6 +40,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+from pipeline_io import (  # noqa: E402
+    AUDIO_FORMATS, emit, emit_manifest, emit_plan, enable_progress, export_formats,
+    json_mode, parse_formats, print_json,
+)
 
 
 def die(msg: str, code: int = 1) -> None:
@@ -731,6 +741,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="For --denoise-profile-*: how aggressively to subtract the noise profile, "
         "0-1 (default 1.0 = full).",
     )
+    p.add_argument(
+        "--formats",
+        type=parse_formats,
+        default=("wav24",),
+        help=f"Comma-separated audio deliverables per master: {', '.join(AUDIO_FORMATS)} (default: wav24)",
+    )
+    p.add_argument("--title", help="Title tag for the audio deliverables")
+    p.add_argument("--artist", help="Artist tag for the audio deliverables")
+    p.add_argument("--json", action="store_true", help="With --plan-only: print the plan as one JSON document")
+    p.add_argument("--progress-json", action="store_true", help="Emit machine-readable progress lines (see pipeline_io.py)")
     return p
 
 
@@ -740,6 +760,12 @@ def write_report(path: Path, lines: list[str]) -> None:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.json and not args.plan_only:
+        die("--json only applies to --plan-only", 2)
+    if args.json:
+        json_mode()
+    if args.progress_json:
+        enable_progress()
     if args.ask or not args.input or not args.label:
         questions()
         if not args.input:
@@ -770,6 +796,25 @@ def main() -> int:
             "A/B it against a few real takes before trusting it unattended."
         )
 
+    have_cleanup = bool(
+        args.remove_voice or args.remove_voice_at
+        or args.denoise_profile_start is not None or args.denoise_profile_file is not None
+    )
+    plan_steps = [("analyze", "Finding the clean bed")]
+    if have_cleanup:
+        plan_steps.append(("cleanup", "Noise / voice removal"))
+    plan_steps.append(("eq", "EQ"))
+    if not args.skip_long:
+        plan_steps.append(("long", "Long master"))
+    if not args.skip_short:
+        plan_steps.append(("short", "Short master (180s)"))
+    plan_steps.append(("deliverables", "Writing audio formats"))
+    if args.still_16x9 or args.still_9x16:
+        plan_steps.append(("mux", "Still-image videos"))
+    if not args.plan_only:
+        emit_plan(plan_steps)
+    emit("step_start", step="analyze", label="Finding the clean bed")
+
     probe = subprocess.check_output(["ffprobe", "-hide_banner", "-i", str(src)], stderr=subprocess.STDOUT, text=True)
     (out_dir / "00_probe.txt").write_text(probe)
     print(probe)
@@ -798,6 +843,9 @@ def main() -> int:
 
     trim_path = out_dir / "02_trim.wav"
     copy_trim(src, trim_path, start, end)
+    emit("step_end", step="analyze")
+    if have_cleanup and not args.plan_only:
+        emit("step_start", step="cleanup", label="Noise / voice removal")
 
     pre_eq_notes: list[str] = []
     have_profile = (
@@ -907,6 +955,8 @@ def main() -> int:
             f"remove_voice_at={' '.join(applied)} pad={args.remove_voice_pad} model={args.voice_model}"
         )
 
+    if have_cleanup and not args.plan_only:
+        emit("step_end", step="cleanup")
     vd_trim = volumedetect(trim_path)
     max_vol = vd_trim["max_volume"] if vd_trim["max_volume"] is not None else -12.0
 
@@ -928,6 +978,24 @@ def main() -> int:
         loop_mode = args.loop
         if loop_mode == "auto" and args.label in CORRELATED_WATER:
             loop_mode = "never"
+        if args.json:
+            print_json({
+                "pipeline": "nature", "script": "process_field_wav.py", "label": args.label,
+                "place": args.place, "untested_recipe": bool(recipe.get("untested")),
+                "duration": analysis["dur"], "clean_runs": len(analysis.get("clean_runs") or []),
+                "bed": {"start": start, "end": end, "why": why},
+                "eq_chain": chain,
+                "targets": {"long": [long_i, long_tp, long_lra], "short": [short_i, short_tp, short_lra]},
+                "short_loop_mode": loop_mode, "correlated_water": args.label in CORRELATED_WATER,
+                "loop_target": args.loop_target,
+                "cleanup": {
+                    "denoise_profile": have_profile, "remove_voice": bool(args.remove_voice),
+                    "remove_voice_at": args.remove_voice_at or [],
+                },
+                "formats": list(args.formats),
+                "steps": [{"step": n, "label": lbl} for n, lbl in plan_steps],
+            })
+            return 0
         print("\n=== PLAN ONLY (no rendering) ===")
         print(f"bed: {start:.2f}-{end:.2f}s ({why})")
         print(f"eq chain: {chain}")
@@ -944,7 +1012,9 @@ def main() -> int:
         return 0
 
     eq_path = out_dir / "03_eq.wav"
+    emit("step_start", step="eq", label="EQ")
     ffmpeg_wav(chain, trim_path, eq_path)
+    emit("step_end", step="eq")
 
     products = []
     report = [
@@ -997,6 +1067,7 @@ def main() -> int:
 
     long_master = None
     if not args.skip_long:
+        emit("step_start", step="long", label="Long master")
         long_src = eq_path
         long_dur = duration_seconds(eq_path)
         if args.loop_target is not None:
@@ -1057,9 +1128,11 @@ def main() -> int:
         fade = 4.0 if long_dur > 120 else 1.0
         long_master = finish_master("long", long_src, fade, fade)
         products.append(long_master)
+        emit("step_end", step="long")
 
     short_master = None
     if not args.skip_short:
+        emit("step_start", step="short", label="Short master (180s)")
         short_src = eq_path
         short_dur = duration_seconds(eq_path)
         loop_mode = args.loop
@@ -1110,6 +1183,24 @@ def main() -> int:
             report.append("short_looped=no used_first_180s_of_eq_bed")
         short_master = finish_master("short", short_src, 0.4, 0.4)
         products.append(short_master)
+        emit("step_end", step="short")
+
+    emit("step_start", step="deliverables", label="Writing audio formats")
+    meta = {
+        "title": args.title or "", "artist": args.artist or "",
+        "genre": "Nature", "comment": f"label={args.label}; place={args.place}",
+    }
+    manifest: list[dict] = []
+    for kind, m in (("master_long", long_master), ("master_short", short_master)):
+        if m is None:
+            continue
+        for fmt, pth in export_formats(m, m.stem, args.formats, meta, kind=kind).items():
+            manifest.append({"kind": kind, "format": fmt, "path": pth})
+            if pth != m:
+                products.append(pth)
+    emit("step_end", step="deliverables")
+    if args.still_16x9 or args.still_9x16:
+        emit("step_start", step="mux", label="Still-image videos")
 
     stills = {}
     if args.still_16x9 and args.still_16x9.exists():
@@ -1134,6 +1225,13 @@ def main() -> int:
         mux_still(stills["9x16"], short_master, mux, short=True)
         products.append(mux)
 
+    if args.still_16x9 or args.still_9x16:
+        emit("step_end", step="mux")
+    for kind, name in (("video_long", "long.mp4"), ("video_short", "short.mp4"), ("thumbnail", "thumb_1280x720.jpg"),
+                       ("thumbnail", "thumb_1080x1920.jpg")):
+        if (out_dir / name) in products or (kind == "thumbnail" and (out_dir / name).exists() and stills):
+            manifest.append({"kind": kind, "format": Path(name).suffix.lstrip("."), "path": out_dir / name})
+
     if not stills:
         report.append(
             "stills=skipped (pass --still-16x9 and --still-9x16 to mux still-frame videos)"
@@ -1147,6 +1245,8 @@ def main() -> int:
     for pth in products:
         report.append(f"  {pth}")
     write_report(out_dir / "REPORT.txt", report)
+    manifest.append({"kind": "report", "format": "txt", "path": out_dir / "REPORT.txt"})
+    emit_manifest(manifest)
 
     print("\n=== REPORT ===")
     print("\n".join(report))

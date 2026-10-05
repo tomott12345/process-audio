@@ -256,6 +256,32 @@ These need `librosa` (the visualizer's optional dependency) plus the core
 numpy/scipy; see `requirements-optional.txt`. Analysis decodes the whole
 file at 22.05 kHz -- about 480 MB of RAM for a 45-minute stereo jam.
 
+## Driving the pipelines from another program
+
+Every pipeline (music via `release.py`, nature via `process_field_wav.py`,
+speech via `process_speech_wav.py`) shares one machine-readable interface,
+built for the web app but usable by anything:
+
+- `python3 pipeline_capabilities.py` prints the pipelines, content types,
+  options (with per-type defaults, ranges, Basic/Advanced, dependencies,
+  and the exact flag each maps to), outputs, and formats as JSON.
+  `build_argv()` in the same file is the reference form-to-command-line
+  mapping.
+- `--formats wav24,wav16,flac,mp3` on every pipeline: each format is
+  encoded from the 24-bit/48k master and tagged. The defaults are
+  unchanged: wav24 for nature and speech, wav24+wav16 for music.
+- `--plan-only --json` prints the resolved plan as a single JSON document.
+- `--progress-json` adds `@@progress {...}` lines to stdout: a `plan`
+  event first, step start/progress/end events, and a `manifest` of the
+  deliverables last.
+- `release.py --outputs master,clip,video_16x9,video_9x16,video_1x1,captions,analysis`
+  makes only what's asked for. Music mastering switches (`--no-eq`,
+  `--no-glue`, `--mono-bass-hz`, `--fade-in`, `--softclip-threshold`, ...)
+  work on both `process_music_wav.py` and `release.py`.
+- `python3 audio_peaks.py take.wav` prints a waveform overview for drawing.
+
+Tests: `pytest tests/` (add `-m "not slow"` to skip the renders).
+
 ## Removing unwanted noise or a voice/foreground
 
 Two optional, narrower alternatives to full "stem isolation" (which isn't
@@ -450,6 +476,11 @@ Run `python3 visualize_wav.py --help` for the full flag list and defaults.
   YouTube/Instagram
 - `pick_clip.py` -- music: bar-aligned Short/Reel excerpt (or seamless loop)
 - `music_common.py` -- shared helpers for the music scripts
+- `pipeline_capabilities.py` -- all pipelines/options/outputs as JSON (+ `build_argv()`)
+- `pipeline_io.py` -- shared output formats and `--progress-json` events
+- `audio_peaks.py` -- waveform overview JSON for any audio file
+- `tests/` -- pipeline contract + render tests; synthetic test audio generator
+- `WEB_APP_PLAN.md` -- plan for the Go web front end
 - `music_recipes.json` -- music: per-genre recipes and loudness presets
 - `recipes.json` -- per-label EQ chains, loudness targets, loop policy,
   clean-run detector tuning

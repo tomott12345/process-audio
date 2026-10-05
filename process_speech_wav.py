@@ -24,6 +24,12 @@ Usage:
   python3 process_speech_wav.py interview.wav --preset apple
   python3 process_speech_wav.py interview.wav --start 0:08 --end 42:10 --mono
   python3 process_speech_wav.py interview.wav --trim-silence --plan-only
+  python3 process_speech_wav.py interview.wav --formats wav24,mp3 --title "Episode 12"
+
+--formats picks the deliverables (wav24, wav16, flac, mp3; default wav24 --
+the master.wav this script has always written). --plan-only --json prints
+the plan as JSON; --progress-json emits machine-readable progress (see
+pipeline_io.py).
 """
 
 from __future__ import annotations
@@ -35,6 +41,11 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+from pipeline_io import (
+    AUDIO_FORMATS, emit, emit_manifest, emit_plan, enable_progress, export_formats,
+    json_mode, parse_formats, print_json,
+)
 
 REQUIRED_FILTERS = (
     "highpass", "equalizer", "deesser", "acompressor",
@@ -195,6 +206,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--silence-threshold", type=float, default=-45.0, help="dB threshold for --trim-silence (default -45)")
     p.add_argument("--out-dir", type=Path, help="Output folder (default: <stem>_podcast/)")
     p.add_argument("--plan-only", action="store_true", help="Print the resolved chain and targets, then exit without rendering")
+    p.add_argument("--formats", type=parse_formats, default=("wav24",),
+                   help=f"Comma-separated deliverables: {', '.join(AUDIO_FORMATS)} (default: wav24)")
+    p.add_argument("--title", help="Title tag for the deliverables")
+    p.add_argument("--artist", help="Artist / show tag for the deliverables")
+    p.add_argument("--json", action="store_true", help="With --plan-only: print the plan as one JSON document")
+    p.add_argument("--progress-json", action="store_true", help="Emit machine-readable progress lines (see pipeline_io.py)")
     return p
 
 
@@ -204,6 +221,12 @@ def write_report(path: Path, lines: list[str]) -> None:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.json and not args.plan_only:
+        die("--json only applies to --plan-only", 2)
+    if args.json:
+        json_mode()
+    if args.progress_json:
+        enable_progress()
     if not args.input:
         die("pass a WAV path as the first argument", 2)
 
@@ -217,6 +240,22 @@ def main() -> int:
 
     chain = tone_chain(compress=not args.no_compress, deess=not args.no_deess)
 
+    plan_steps = []
+    if args.start is not None or args.end is not None:
+        plan_steps.append(("trim", "Trimming"))
+    if args.trim_silence:
+        plan_steps.append(("silence", "Trimming leading/trailing silence"))
+    plan_steps += [("process", "Cleanup EQ / de-ess / compression"), ("loudness", "Loudness + limiter"),
+                   ("deliverables", "Writing audio formats")]
+    if args.plan_only and args.json:
+        print_json({
+            "pipeline": "speech", "script": "process_speech_wav.py", "preset": args.preset,
+            "targets": {"i": i, "tp": tp, "lra": lra}, "chain": chain, "mono": args.mono,
+            "trim_silence": args.trim_silence, "silence_threshold": args.silence_threshold,
+            "trim": {"start": args.start, "end": args.end}, "formats": list(args.formats),
+            "steps": [{"step": n, "label": lbl} for n, lbl in plan_steps],
+        })
+        return 0
     if args.plan_only:
         print("=== PLAN ONLY (no rendering) ===")
         print(f"preset: {args.preset}  targets: I={i} TP={tp} LRA={lra}")
@@ -233,6 +272,7 @@ def main() -> int:
     out_dir = (args.out_dir or src.parent / f"{src.stem}_podcast").resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    emit_plan(plan_steps)
     print(f"source: {src}")
     print(f"out:    {out_dir}")
     print(f"preset: {args.preset}   targets: I={i} TP={tp} LRA={lra}")
@@ -262,9 +302,11 @@ def main() -> int:
     ]
 
     if args.start is not None or args.end is not None:
+        emit("step_start", step="trim", label="Trimming")
         trimmed = out_dir / "01_trim.wav"
         copy_trim(cur, trimmed, start, end)
         cur = trimmed
+        emit("step_end", step="trim")
 
     if args.trim_silence:
         # Only "start_*" options -- never "stop_*". silenceremove's stop_periods
@@ -274,6 +316,7 @@ def main() -> int:
         # truncate a real interview right after its first breath. Trimming
         # leading silence, reversing, trimming leading silence again, then
         # reversing back only ever touches the true start and true end.
+        emit("step_start", step="silence", label="Trimming leading/trailing silence")
         silence_trimmed = out_dir / "01b_silence_trim.wav"
         th = args.silence_threshold
         one_end = f"silenceremove=start_periods=1:start_duration=0.3:start_threshold={th}dB:start_silence=0.2"
@@ -281,13 +324,17 @@ def main() -> int:
         ffmpeg_wav(sr_chain, cur, silence_trimmed)
         cur = silence_trimmed
         report.append(f"trim_silence=yes threshold={th}dB (leading+trailing only, never mid-file)")
+        emit("step_end", step="silence")
 
+    emit("step_start", step="process", label="Cleanup EQ / de-ess / compression")
     processed = out_dir / "02_processed.wav"
     full_chain = chain
     if args.mono:
         full_chain = full_chain + ",pan=mono|c0=0.5*c0+0.5*c1"
     ffmpeg_wav(full_chain, cur, processed)
 
+    emit("step_end", step="process")
+    emit("step_start", step="loudness", label="Loudness + limiter")
     meas = loudnorm_measure(processed, i, tp, lra)
     proc_dur = duration_seconds(processed)
     fade = 0.5 if proc_dur > 4.0 else max(0.05, proc_dur / 8)
@@ -306,17 +353,26 @@ def main() -> int:
     )
     master = out_dir / "master.wav"
     ffmpeg_wav(af, processed, master)
+    emit("step_end", step="loudness")
+    emit("step_start", step="deliverables", label="Writing audio formats")
+    meta = {"title": args.title or "", "artist": args.artist or "", "genre": "Speech",
+            "comment": f"preset={args.preset}"}
+    products = export_formats(master, "master", args.formats, meta)
+    emit("step_end", step="deliverables")
     vd = volumedetect(master)
     report.append(
         f"measured_I={meas.get('input_i')} input_lra={meas.get('input_lra')} "
         f"final_max_volume={vd['max_volume']} final_dur={proc_dur:.3f}"
     )
-    report.append(f"product={master}")
+    report += [f"product={pth}" for pth in products.values()]
     write_report(out_dir / "REPORT.txt", report)
+    emit_manifest([{"kind": "master", "format": f, "path": pth} for f, pth in products.items()]
+                  + [{"kind": "report", "format": "txt", "path": out_dir / "REPORT.txt"}])
 
     print("\n=== REPORT ===")
     print("\n".join(report))
-    print(f"\nWrote {master}")
+    for pth in products.values():
+        print(f"Wrote {pth}")
     print(f"Wrote {out_dir / 'REPORT.txt'}")
     return 0
 

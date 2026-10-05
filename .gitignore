@@ -1,6 +1,7 @@
 # OS / editor cruft
 .DS_Store
 __pycache__/
+.pytest_cache/
 *.pyc
 
 # Generated per-run outputs -- never commit personal recordings or renders

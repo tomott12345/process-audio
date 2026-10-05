@@ -39,3 +39,7 @@ pillow>=10
 # key, and section analysis -- no extra install beyond that line.
 # music_analyze.py --png (optional one-page analysis chart) also needs:
 matplotlib>=3.7
+
+# Tests (pytest tests/): the contract + render tests. soundfile comes with
+# librosa and is used to write the synthetic test audio.
+pytest>=7
