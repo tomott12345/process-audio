@@ -199,7 +199,7 @@ func (m *Manager) load() error {
 				}
 			}
 		}
-		en := &entry{job: &j, subs: map[chan Message]struct{}{}}
+		en := &entry{job: &j, subs: map[chan Message]struct{}{}, logs: tailLines(filepath.Join(m.dir, j.ID, "log.txt"), logTail)}
 		m.jobs[j.ID] = en
 		m.persist(en)
 	}
@@ -601,6 +601,22 @@ func apply(j *Job, ev runner.Event, outDir string) bool {
 		return true
 	}
 	return false
+}
+
+// tailLines returns the last n lines of a file (the job log after a restart).
+func tailLines(path string, n int) []string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	if len(lines) == 1 && lines[0] == "" {
+		return nil
+	}
+	return lines
 }
 
 // inside checks that p is a regular file (not a symlink) within dir.

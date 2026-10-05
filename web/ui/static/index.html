@@ -3,11 +3,165 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>Process Audio</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+<script type="module" src="app.js"></script>
 </head>
 <body>
-<h1>Process Audio</h1>
-<p>The API server is running. The browser interface arrives in phase 3 of WEB_APP_PLAN.md.</p>
-<p>Try <a href="/api/capabilities">/api/capabilities</a> or <a href="/api/jobs">/api/jobs</a>.</p>
+<header class="topbar">
+  <a class="brand" href="#/">
+    <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M3 16h3M9 10v12M13 5v22M17 11v10M21 7v18M25 13v6M29 16h0"/></svg>
+    <span>Process Audio</span>
+  </a>
+  <nav class="topnav">
+    <button type="button" class="btn ghost" id="jobs-toggle" aria-controls="jobs-drawer" aria-expanded="false">
+      Jobs <span class="pill" id="jobs-active" hidden>0</span>
+    </button>
+    <button type="button" class="btn ghost icon" id="theme-toggle" aria-label="Switch light/dark theme" title="Switch light/dark theme">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg>
+    </button>
+  </nav>
+</header>
+
+<div class="banner" id="banner" role="alert" hidden>
+  <span id="banner-text"></span>
+  <button type="button" class="btn ghost icon" id="banner-close" aria-label="Dismiss">×</button>
+</div>
+
+<main class="layout">
+  <!-- ======================= new job ======================= -->
+  <section id="wizard" class="wizard" aria-label="New job">
+    <div class="intro">
+      <h1>Process a recording</h1>
+      <p class="muted">Pick what it is, drop in the WAV, choose what you want back.</p>
+    </div>
+
+    <section class="card step" id="step-pipeline">
+      <header class="step-head"><span class="step-num">1</span><h2>What kind of audio?</h2></header>
+      <div class="choice-grid three" id="pipelines" role="radiogroup" aria-label="Pipeline"></div>
+    </section>
+
+    <section class="card step" id="step-upload">
+      <header class="step-head"><span class="step-num">2</span><h2>Upload the WAV</h2></header>
+      <label class="dropzone" id="dropzone">
+        <input type="file" id="file-input" accept=".wav,audio/wav,audio/x-wav,audio/wave">
+        <span class="dz-main"><strong>Drop a WAV here</strong> or click to choose</span>
+        <span class="dz-sub muted">Mono or stereo · up to <span id="max-upload">2 GB</span> · your file never leaves this computer</span>
+      </label>
+      <div class="upload-progress" id="upload-progress" hidden>
+        <div class="bar"><div class="bar-fill" id="upload-bar"></div></div>
+        <span class="muted tabular" id="upload-pct">0%</span>
+      </div>
+      <div class="file-info" id="file-info" hidden>
+        <div class="file-row">
+          <div>
+            <div class="file-name" id="file-name"></div>
+            <div class="facts tabular" id="file-facts"></div>
+          </div>
+          <button type="button" class="btn ghost small" id="replace-file">Replace</button>
+        </div>
+        <figure class="wave" id="wave">
+          <svg viewBox="0 0 1000 120" preserveAspectRatio="none" id="wave-svg" aria-hidden="true">
+            <defs>
+              <linearGradient id="wave-grad" x1="0" x2="1" y1="0" y2="0">
+                <stop offset="0" class="g0"/><stop offset="1" class="g1"/>
+              </linearGradient>
+            </defs>
+            <g id="wave-overlay"></g>
+            <path id="wave-path"/>
+            <g id="wave-markers"></g>
+          </svg>
+          <figcaption class="wave-axis tabular" id="wave-axis"></figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="card step" id="step-type" hidden>
+      <header class="step-head"><span class="step-num">3</span><h2 id="type-title">Type</h2></header>
+      <div class="choice-grid" id="types" role="radiogroup"></div>
+      <div class="analysis" id="analysis" aria-live="polite" hidden></div>
+    </section>
+
+    <section class="card step" id="step-options" hidden>
+      <header class="step-head"><span class="step-num" id="options-num">4</span><h2>Options</h2>
+        <button type="button" class="btn ghost small push" id="reset-options">Reset to defaults</button>
+      </header>
+      <div id="options-basic" class="option-groups"></div>
+      <details class="advanced" id="advanced">
+        <summary><span>Advanced</span> <span class="muted small" id="advanced-count"></span></summary>
+        <div id="options-advanced" class="option-groups"></div>
+      </details>
+    </section>
+
+    <section class="card step" id="step-outputs" hidden>
+      <header class="step-head"><span class="step-num" id="outputs-num">5</span><h2>What do you want back?</h2></header>
+      <div class="chips" id="outputs" role="group" aria-label="Outputs"></div>
+      <div id="formats-wrap">
+        <h3 class="subhead">Audio formats</h3>
+        <div class="chips" id="formats" role="group" aria-label="Audio formats"></div>
+      </div>
+    </section>
+
+    <div class="runbar" id="runbar" hidden>
+      <p class="muted small" id="run-summary"></p>
+      <div class="runbar-actions">
+        <button type="button" class="btn" id="plan-btn">Show plan</button>
+        <button type="button" class="btn primary" id="run-btn">Run</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= one job ======================= -->
+  <section id="jobview" class="jobview" aria-label="Job" hidden>
+    <a href="#/" class="back">← New job</a>
+    <section class="card">
+      <header class="job-head">
+        <div>
+          <h1 id="job-title"></h1>
+          <p class="muted" id="job-sub"></p>
+        </div>
+        <span class="state" id="job-state"></span>
+      </header>
+      <div class="error-box" id="job-error" hidden></div>
+      <ol class="steps" id="job-steps" aria-live="polite"></ol>
+      <div class="job-actions">
+        <button type="button" class="btn danger" id="cancel-btn" hidden>Cancel</button>
+        <button type="button" class="btn" id="rerun-btn" hidden>Edit &amp; run again</button>
+        <a class="btn primary" id="zip-btn" hidden>Download all (.zip)</a>
+      </div>
+      <details class="mono-details">
+        <summary>Command</summary>
+        <pre class="mono" id="job-command"></pre>
+      </details>
+      <details class="mono-details" id="log-details">
+        <summary>Log</summary>
+        <pre class="mono log" id="job-log"></pre>
+      </details>
+    </section>
+    <section class="results" id="results" hidden></section>
+  </section>
+</main>
+
+<aside class="drawer" id="jobs-drawer" aria-label="Jobs" hidden>
+  <header class="drawer-head">
+    <h2>Jobs</h2>
+    <button type="button" class="btn ghost icon" id="jobs-close" aria-label="Close">×</button>
+  </header>
+  <ul class="job-list" id="job-list"></ul>
+</aside>
+
+<dialog class="modal" id="plan-dialog" aria-labelledby="plan-title">
+  <header class="modal-head">
+    <h2 id="plan-title">Plan</h2>
+    <button type="button" class="btn ghost icon" id="plan-close" aria-label="Close">×</button>
+  </header>
+  <div id="plan-body"></div>
+  <footer class="modal-foot">
+    <button type="button" class="btn" id="plan-cancel">Back</button>
+    <button type="button" class="btn primary" id="plan-run">Run</button>
+  </footer>
+</dialog>
 </body>
 </html>

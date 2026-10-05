@@ -84,6 +84,29 @@ binary, and loopback-only until phase 5. It covers:
 - **Security:** CSP and other security headers, plus a same-origin check
   and a custom header on every state-changing request.
 
+## Phase 3 (done): the browser interface
+
+Implemented in `web/ui/static` (`index.html`, `app.css` ~400 lines,
+`app.js` ~800 lines), embedded into the binary. It follows the screens
+described below, with these choices:
+- Dark studio theme by default, with light following the OS or the toggle.
+  The gold-to-violet accent matches the videos.
+- No inline styles or scripts, so the strict CSP holds.
+- Every option renders from the capabilities, with its per-type default.
+  Advanced starts collapsed. Unset numbers show a "Customize" button
+  rather than a misleading slider position.
+- The title defaults to the uploaded file's name. Without this it would
+  become "input", because every upload is stored as input.wav.
+- Live job view over SSE, with players and downloads for results, and
+  "Edit & run again".
+
+Tested in the browser pane, at desktop and phone width (no horizontal
+scroll at 375px), in light and dark:
+- upload → techno analysis (127.9 BPM, drop at 0:15) → Advanced changes
+  → plan → run (frame progress) → results
+- re-run as speech, with the file-name title
+- the jobs drawer
+
 ## What the user sees
 
 Five steps in a single page. Each step unlocks the next. First, pick

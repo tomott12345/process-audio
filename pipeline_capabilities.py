@@ -35,6 +35,7 @@ Option fields:
   advanced (true = behind the collapsed "Advanced" disclosure),
   default, defaults_by_type {type: value}, detail_by_type {type: text},
   min / max / step / unit, choices [{value, label}],
+  suggest                      -- a starting value for a number with no default (UI only)
   applies_to [types]           -- absent = every type
   requires_option {id: value}  -- only meaningful when another option has that value
   requires_output [outputs]    -- only meaningful when one of these outputs is chosen
@@ -100,6 +101,7 @@ def opt(id, group, label, kind, **kw) -> dict:
 
 
 TIME_HELP = "seconds, or mm:ss / hh:mm:ss"
+PROPER = {"youtube": "YouTube", "apple": "Apple Podcasts", "spotify": "Spotify", "instagram": "Instagram"}
 
 
 # ---------------------------------------------------------------- music
@@ -140,7 +142,7 @@ def music_pipeline(deps: dict) -> dict:
             help="Video overlay, file tags, and captions (default: the file name)"),
         opt("artist", "tags", "Artist", "text", flag="--artist", default=""),
         opt("preset", "loudness", "Loudness target", "choice", flag="--preset", default="youtube",
-            choices=[{"value": k, "label": f"{k.capitalize()} ({v['target_i']:g} LUFS)"
+            choices=[{"value": k, "label": f"{PROPER.get(k, k.capitalize())} ({v['target_i']:g} LUFS)"
                       + (" -- unverified" if v.get("untested") else "")} for k, v in presets.items()],
             help="Ambient lands 2 LU under the preset on purpose"),
         opt("clip_length", "clip", "Short/Reel length", "choice", flag="--clip-length", default="30",
@@ -154,9 +156,9 @@ def music_pipeline(deps: dict) -> dict:
         opt("end", "trim", "End", "time", flag="--end", advanced=True, help=TIME_HELP),
         # advanced: loudness
         opt("target_i", "loudness", "Custom loudness", "number", flag="--target-i", advanced=True,
-            min=-30, max=-6, step=0.5, unit="LUFS", help="Overrides the preset"),
+            min=-30, max=-6, step=0.5, unit="LUFS", suggest=-14, help="Overrides the preset"),
         opt("target_tp", "loudness", "True-peak ceiling", "number", flag="--target-tp", advanced=True,
-            min=-3, max=-0.1, step=0.1, unit="dBTP"),
+            min=-3, max=-0.1, step=0.1, unit="dBTP", suggest=-1.0),
         # advanced: processing
         opt("highpass_hz", "processing", "Subsonic high-pass", "number", flag="--highpass-hz", advanced=True,
             min=10, max=60, step=1, unit="Hz", defaults_by_type=by_type(lambda r: r["highpass_hz"]),
@@ -203,7 +205,7 @@ def music_pipeline(deps: dict) -> dict:
             defaults_by_type=by_type(lambda r: int(visual_arg(r, "--symmetry", 1))),
             requires_output=videos, requires_option={"style": "radial"}),
         opt("max_seconds", "video", "Preview length", "number", flag="--max-seconds", advanced=True,
-            min=1, max=600, step=1, unit="s", requires_output=videos,
+            min=1, max=600, step=1, unit="s", suggest=20, requires_output=videos,
             help="Render only the first N seconds of each video -- a quick look before the full render"),
         opt("method", "tags", "How it was made (captions)", "text", flag="--method", advanced=True,
             default="Hardware synths, recorded DAWless and mixed live on a 1010music Bluebox.",
@@ -338,7 +340,7 @@ def speech_pipeline(deps: dict) -> dict:
 
     options = [
         opt("preset", "loudness", "Platform", "choice", flag="--preset", default="general",
-            choices=[{"value": k, "label": f"{k.capitalize()} ({v[0]:g} LUFS)"} for k, v in PRESETS.items()]),
+            choices=[{"value": k, "label": f"{PROPER.get(k, k.capitalize())} ({v[0]:g} LUFS)"} for k, v in PRESETS.items()]),
         opt("title", "tags", "Title", "text", flag="--title", default=""),
         opt("artist", "tags", "Show / artist", "text", flag="--artist", default=""),
         opt("trim_silence", "trim", "Trim leading/trailing silence", "bool", flag_true="--trim-silence",
@@ -353,11 +355,11 @@ def speech_pipeline(deps: dict) -> dict:
         opt("mono", "processing", "Mono", "bool", flag_true="--mono", default=False, advanced=True,
             help="Many podcast loudness specs are defined for mono"),
         opt("target_i", "loudness", "Custom loudness", "number", flag="--target-i", advanced=True,
-            min=-30, max=-10, step=0.5, unit="LUFS"),
+            min=-30, max=-10, step=0.5, unit="LUFS", suggest=-16),
         opt("target_tp", "loudness", "True-peak ceiling", "number", flag="--target-tp", advanced=True,
-            min=-3, max=-0.1, step=0.1, unit="dBTP"),
+            min=-3, max=-0.1, step=0.1, unit="dBTP", suggest=-1.5),
         opt("target_lra", "loudness", "Loudness range", "number", flag="--target-lra", advanced=True,
-            min=3, max=20, step=0.5, unit="LU"),
+            min=3, max=20, step=0.5, unit="LU", suggest=9),
     ]
     return {
         "id": "speech", "label": "Speech",

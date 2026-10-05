@@ -108,6 +108,9 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 				}
 			}
 		}
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			h.Set("Cache-Control", "no-cache") // the UI is embedded; always revalidate
+		}
 		start := time.Now()
 		next.ServeHTTP(w, r)
 		// log changes and slow reads, not the UI's routine polling
