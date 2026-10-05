@@ -38,6 +38,7 @@ Option fields:
   suggest                      -- a starting value for a number with no default (UI only)
   applies_to [types]           -- absent = every type
   requires_option {id: value}  -- only meaningful when another option has that value
+                                  (a list value means "any of these")
   requires_output [outputs]    -- only meaningful when one of these outputs is chosen
   requires_analysis "has_grid" -- depends on the uploaded file (music analysis)
   requires_dependency name     -- disabled, with disabled_reason, if it isn't installed
@@ -101,6 +102,85 @@ def opt(id, group, label, kind, **kw) -> dict:
 
 
 TIME_HELP = "seconds, or mm:ss / hh:mm:ss"
+
+# visualizer styles: the first four are visualize_wav.py (beat-locked,
+# Python-drawn); the rest are ffmpeg filters via ffmpeg_visualize.py
+STYLE_LABELS = (
+    ("radial", "Radial -- beat-locked"), ("bars", "Bars -- beat-locked"),
+    ("glowburst", "Glowburst -- beat-locked"), ("wormhole", "Wormhole -- beat-locked"),
+    ("cqt", "CQT spectrum -- ffmpeg"), ("spectrum", "Spectrogram -- ffmpeg"),
+    ("waves", "Waveform -- ffmpeg"), ("vectorscope", "Vectorscope -- ffmpeg"),
+    ("freqs", "Frequency bars -- ffmpeg"), ("histogram", "Level histogram -- ffmpeg"),
+    ("spatial", "Stereo spatial -- ffmpeg"),
+)
+FFMPEG_STYLES = ["cqt", "spectrum", "waves", "vectorscope", "freqs", "histogram", "spatial"]
+SPECTRUM_COLORS = ("plasma", "magma", "viridis", "cividis", "rainbow", "intensity", "fire", "fiery",
+                   "nebulae", "moreland", "fruit", "cool", "green", "terrain", "channel")
+
+
+def ffmpeg_viz_options(videos: list[str]) -> list[dict]:
+    """Options for the ffmpeg visualization styles. Each only shows up
+    when one of the styles it affects is chosen (requires_option with a
+    list = "any of these")."""
+    def ch(values):
+        return [{"value": v, "label": v} for v in values]
+
+    def viz(id, label, kind, styles, **kw):
+        req = {"style": styles}
+        req.update(kw.pop("also", {}))
+        return opt(id, "video", label, kind, advanced=True, requires_output=videos, requires_option=req, **kw)
+
+    ff = FFMPEG_STYLES
+    return [
+        viz("viz_palette", "Palette", "choice", ["cqt", "waves", "vectorscope", "freqs", "histogram"],
+            flag="--viz-palette", default="gold-violet",
+            choices=ch(("gold-violet", "neon", "fire", "ice", "mono"))),
+        viz("viz_glow", "Glow", "bool", ff, flag_true="--viz-glow", default=False, help="Soft bloom around bright parts"),
+        viz("viz_glow_strength", "Glow strength", "number", ff, flag="--viz-glow-strength", default=0.6,
+            min=0.1, max=1.0, step=0.05, also={"viz_glow": True}),
+        viz("viz_trails", "Motion trails", "bool", ff, flag_true="--viz-trails", default=False),
+        viz("viz_trails_decay", "Trail length", "number", ff, flag="--viz-trails-decay", default=0.92,
+            min=0.5, max=0.99, step=0.01, also={"viz_trails": True}),
+        viz("viz_cqt_axis", "Note-name axis", "bool", ["cqt"], flag_true="--viz-cqt-axis", default=False),
+        viz("viz_cqt_sonogram", "Scrolling sonogram", "bool", ["cqt"], flag_false="--viz-no-cqt-sonogram", default=True,
+            help="The waterfall under the bars"),
+        viz("viz_spectrum_color", "Colour map", "choice", ["spectrum"], flag="--viz-spectrum-color", default="plasma",
+            choices=ch(SPECTRUM_COLORS)),
+        viz("viz_spectrum_slide", "Movement", "choice", ["spectrum"], flag="--viz-spectrum-slide", default="scroll",
+            choices=[{"value": "scroll", "label": "scroll left"}, {"value": "rscroll", "label": "scroll right"},
+                     {"value": "replace", "label": "sweep"}, {"value": "fullframe", "label": "page by page"}]),
+        viz("viz_spectrum_speed", "Scroll speed", "choice", ["spectrum"], flag="--viz-spectrum-speed", default="medium",
+            choices=ch(("slow", "medium", "fast")), help="Crosses the frame in about 20 / 10 / 5 seconds"),
+        viz("viz_spectrum_scale", "Intensity scale", "choice", ["spectrum"], flag="--viz-spectrum-scale", default="log",
+            choices=ch(("log", "sqrt", "cbrt", "4thrt", "5thrt", "lin"))),
+        viz("viz_spectrum_orientation", "Orientation", "choice", ["spectrum"], flag="--viz-spectrum-orientation",
+            default="vertical", choices=ch(("vertical", "horizontal"))),
+        viz("viz_waves_mode", "Waveform drawing", "choice", ["waves"], flag="--viz-waves-mode", default="cline",
+            choices=[{"value": "cline", "label": "filled"}, {"value": "line", "label": "lines"},
+                     {"value": "p2p", "label": "peaks"}, {"value": "point", "label": "points"}]),
+        viz("viz_waves_split", "One lane per channel", "bool", ["waves"], flag_true="--viz-waves-split", default=False),
+        viz("viz_vectorscope_mode", "Vectorscope mode", "choice", ["vectorscope"], flag="--viz-vectorscope-mode",
+            default="lissajous", choices=[{"value": "lissajous", "label": "lissajous"},
+                                          {"value": "lissajous_xy", "label": "lissajous XY"},
+                                          {"value": "polar", "label": "polar"}]),
+        viz("viz_vectorscope_draw", "Vectorscope drawing", "choice", ["vectorscope"], flag="--viz-vectorscope-draw",
+            default="aaline", choices=[{"value": "aaline", "label": "smooth lines"},
+                                       {"value": "line", "label": "lines"}, {"value": "dot", "label": "dots"}]),
+        viz("viz_vectorscope_zoom", "Vectorscope zoom", "number", ["vectorscope"], flag="--viz-vectorscope-zoom",
+            default=1.5, min=1, max=10, step=0.5, unit="x"),
+        viz("viz_freqs_mode", "Frequency drawing", "choice", ["freqs"], flag="--viz-freqs-mode", default="bar",
+            choices=ch(("bar", "line", "dot"))),
+        viz("viz_freqs_fscale", "Frequency scale", "choice", ["freqs"], flag="--viz-freqs-fscale", default="log",
+            choices=[{"value": "log", "label": "log"}, {"value": "lin", "label": "linear"},
+                     {"value": "rlog", "label": "reverse log"}]),
+        viz("viz_histogram_slide", "Histogram movement", "choice", ["histogram"], flag="--viz-histogram-slide",
+            default="scroll", choices=[{"value": "scroll", "label": "scroll"}, {"value": "replace", "label": "sweep"}]),
+        viz("viz_histogram_dmode", "Channels", "choice", ["histogram"], flag="--viz-histogram-dmode", default="single",
+            choices=[{"value": "single", "label": "combined"}, {"value": "separate", "label": "separate"}]),
+        viz("viz_spatial_win", "Analysis window", "choice", ["spatial"], flag="--viz-spatial-win", default="4096",
+            choices=[{"value": "1024", "label": "1024 (fast, jumpy)"}, {"value": "2048", "label": "2048"},
+                     {"value": "4096", "label": "4096 (smooth)"}]),
+    ]
 PROPER = {"youtube": "YouTube", "apple": "Apple Podcasts", "spotify": "Spotify", "instagram": "Instagram"}
 
 
@@ -196,8 +276,11 @@ def music_pipeline(deps: dict) -> dict:
             requires_output=clip_users, help=TIME_HELP),
         # video
         opt("style", "video", "Visual style", "choice", flag="--style", advanced=True,
-            choices=[{"value": v, "label": v} for v in ("radial", "bars", "glowburst", "wormhole")],
-            defaults_by_type=by_type(lambda r: r["visual_style"]), requires_output=videos),
+            choices=[{"value": v, "label": label} for v, label in STYLE_LABELS],
+            defaults_by_type=by_type(lambda r: r["visual_style"]), requires_output=videos,
+            help="Beat-locked styles follow the analyzed beat grid (slower to render). "
+                 "ffmpeg styles are drawn by ffmpeg's own visualization filters, many times faster."),
+        *ffmpeg_viz_options(videos),
         opt("emoji", "video", "Center emoji", "text", flag="--emoji", flag_empty="--no-emoji", advanced=True,
             defaults_by_type=by_type(lambda r: visual_arg(r, "--emoji", "")),
             requires_output=videos, requires_option={"style": "radial"}),
@@ -426,7 +509,7 @@ def option_active(o: dict, type_id: str | None, values: dict, outputs: list[str]
     for dep_id, want in (o.get("requires_option") or {}).items():
         dep = next(x for x in pipe["options"] if x["id"] == dep_id)
         have = values.get(dep_id, option_default(dep, type_id))
-        if have != want:
+        if (have not in want) if isinstance(want, list) else (have != want):
             return False
     return o.get("available", True)
 

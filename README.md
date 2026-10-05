@@ -523,6 +523,49 @@ warns and skips the emoji rather than failing if none is found.
 
 Run `python3 visualize_wav.py --help` for the full flag list and defaults.
 
+## ffmpeg visualizations
+
+`ffmpeg_visualize.py` makes visualizer videos with ffmpeg's own
+audio-visualization filters. Python only builds the command; ffmpeg draws
+every frame, and on a Mac it encodes with the hardware H.264 encoder.
+It's several times faster than real time, against roughly a quarter of
+real time for the Python-drawn styles in `visualize_wav.py`. These styles
+follow the sound itself rather than the analyzed beat grid.
+
+![All seven ffmpeg styles](docs/images/ffmpeg-styles.png)
+
+| Style | Filter | What it shows | Its own options |
+|---|---|---|---|
+| `cqt` | showcqt | Musical (constant-Q) bars over a scrolling sonogram | note-name axis, sonogram on/off |
+| `spectrum` | showspectrum | Scrolling spectrogram | 15 colour maps, movement (scroll / sweep / page), speed, intensity scale, orientation |
+| `waves` | showwaves | Oscilloscope waveform | filled / lines / peaks / points, one lane per channel |
+| `vectorscope` | avectorscope | Stereo field (lissajous or polar goniometer) | mode, line or dot drawing, zoom |
+| `freqs` | showfreqs | Live frequency response | bars / line / dots, frequency scale |
+| `histogram` | ahistogram | Level histogram over time | scroll or sweep, combined or separate channels |
+| `spatial` | showspatial | Where each frequency sits in the stereo field | analysis window |
+
+Shared options:
+- `--palette` (gold-violet, neon, fire, ice, mono) colours the waveform
+  and vectorscope directly. For CQT, frequency bars, and histogram, it maps
+  brightness onto a black → colour → colour → white ramp. Those filters
+  add the left and right channel colours together, so their own colours
+  turn white on centred (mono) content.
+- `--glow` adds a soft bloom, and `--trails` adds motion trails.
+- `--title` adds a text overlay. This ffmpeg build has no `drawtext`, so
+  the title is drawn as a PNG and overlaid.
+- `--max-seconds` renders a preview.
+
+```bash
+python3 ffmpeg_visualize.py track.wav out.mp4 --style cqt --format landscape
+python3 ffmpeg_visualize.py clip.wav short.mp4 --style spectrum --spectrum-color magma --glow --format shorts
+```
+
+In `release.py` and the web app, pick one as the visual style
+(`--style spectrum`, or **Advanced → Video → Visual style**). Each style's
+own options appear in the web app only when that style is chosen; on the
+command line they're the `--viz-*` flags (`--viz-glow`,
+`--viz-spectrum-color`, ...).
+
 ## Layout
 
 - `process_field_wav.py` / `process_field_wav.sh` -- the main nature-ambience
@@ -536,6 +579,7 @@ Run `python3 visualize_wav.py --help` for the full flag list and defaults.
 - `remove_foreground.py` -- Demucs-based voice/foreground removal (optional,
   heavy; needs `torch` + `demucs`)
 - `batch_process.py` -- run the pipeline over a folder or CSV manifest
+- `ffmpeg_visualize.py` -- fast visualizer videos from ffmpeg's built-in audio-visualization filters (7 styles)
 - `visualize_wav.py` -- audio-reactive visualization video (radial, bar,
   glowburst, or wormhole), muxed with the source WAV into an mp4 (optional; needs
   `librosa` + `pillow`)

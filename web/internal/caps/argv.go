@@ -59,7 +59,7 @@ func (p *Pipeline) Active(o *Option, typeID string, values map[string]any, outpu
 		if !set {
 			have = dep.OptionDefault(typeID)
 		}
-		if !equal(have, want) {
+		if !matches(have, want) {
 			return false
 		}
 	}
@@ -264,6 +264,20 @@ func deref(p *float64) float64 {
 		return 0
 	}
 	return *p
+}
+
+// matches is equal(), except that a list in requires_option means "any
+// of these values".
+func matches(have, want any) bool {
+	if list, ok := want.([]any); ok {
+		for _, w := range list {
+			if equal(have, w) {
+				return true
+			}
+		}
+		return false
+	}
+	return equal(have, want)
 }
 
 // equal compares decoded JSON values the way Python's == does for them

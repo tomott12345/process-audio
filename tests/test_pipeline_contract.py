@@ -122,7 +122,7 @@ def test_every_option_flag_is_accepted(caps, tracks, tmp_path, pid, oid):
     type_id = (o.get("applies_to") or [t["id"] for t in p["types"]] or [None])[0]
     values = {oid: sample_value(o, type_id)}
     for dep, want in (o.get("requires_option") or {}).items():
-        values[dep] = want
+        values[dep] = want[0] if isinstance(want, list) else want
     if o.get("requires_option", {}).get("style") == "radial":
         type_id = "trap"
     outputs = list(o.get("requires_output") or [x["id"] for x in p["outputs"] if x["default"] and x.get("available", True)])
@@ -145,6 +145,16 @@ def test_dash_leading_text_is_one_token(caps, tmp_path):
     assert "--title=-Intro-" in argv
     r = run(argv)
     assert r.returncode == 0, r.stderr
+
+
+def test_release_passes_dash_titles_safely(caps, tmp_path):
+    argv = pc.build_argv(caps, "music", "techno", {"title": "-Intro-", "artist": "-DJ-", "style": "waves"},
+                         ["master", "video_9x16"], ["wav24"], "x.wav", str(tmp_path), plan=True)
+    plan = json.loads(run(argv).stdout)
+    for st in plan["steps"]:
+        cmd = st["command"] or []
+        for i, tok in enumerate(cmd):
+            assert tok not in ("--title", "--artist"), f"{st['step']}: {tok} {cmd[i + 1] if i + 1 < len(cmd) else ''}"
 
 
 def test_build_argv_rejects_bad_input(caps):
@@ -172,6 +182,30 @@ def test_inactive_options_are_not_sent(caps):
     # video-only options are dropped when no video is requested
     argv = pc.build_argv(caps, "music", "trap", {"symmetry": 6}, ["master"], ["wav24"], "i", "o")
     assert not any(a.startswith("--symmetry") for a in argv)
+
+
+def test_ffmpeg_style_options_follow_the_style(caps):
+    # spectrum knobs only for the spectrum style; palette for several styles
+    base = {"style": "spectrum", "viz_spectrum_color": "magma", "viz_palette": "fire", "viz_waves_split": True}
+    argv = pc.build_argv(caps, "music", "techno", base, ["video_9x16"], ["wav24"], "x.wav", "/tmp/o", plan=True)
+    assert "--style=spectrum" in argv and "--viz-spectrum-color=magma" in argv
+    assert not any(a.startswith(("--viz-palette", "--viz-waves-split")) for a in argv)
+    argv = pc.build_argv(caps, "music", "techno", dict(base, style="waves"), ["video_9x16"], ["wav24"],
+                         "x.wav", "/tmp/o", plan=True)
+    assert "--viz-palette=fire" in argv and "--viz-waves-split" in argv
+    assert not any(a.startswith("--viz-spectrum") for a in argv)
+    # glow strength needs both an ffmpeg style and glow switched on
+    argv = pc.build_argv(caps, "music", "techno", {"style": "cqt", "viz_glow_strength": 0.3}, ["video_9x16"],
+                         ["wav24"], "x.wav", "/tmp/o", plan=True)
+    assert not any(a.startswith("--viz-glow-strength") for a in argv)
+    argv = pc.build_argv(caps, "music", "techno", {"style": "cqt", "viz_glow": True, "viz_glow_strength": 0.3},
+                         ["video_9x16"], ["wav24"], "x.wav", "/tmp/o", plan=True)
+    assert "--viz-glow" in argv and "--viz-glow-strength=0.3" in argv
+    # the ffmpeg route: no beat grid, ffmpeg_visualize.py instead of visualize_wav.py
+    plan = json.loads(run(argv).stdout)
+    video = next(st for st in plan["steps"] if st["step"] == "video_9x16")
+    assert video["command"][1].endswith("ffmpeg_visualize.py") and "--grid" not in video["command"]
+    assert "--glow" in video["command"] and "--glow-strength=0.3" in video["command"]
 
 
 def test_release_outputs_select_steps(caps):
@@ -246,6 +280,22 @@ def test_music_release_toggles_formats_and_video(caps, tracks, tmp_path):
     assert "acompressor" not in (tmp_path / "audio" / "REPORT.txt").read_text()  # --no-glue reached the chain
     frames = [e for e in ev if e.get("detail") == "frames" and e.get("parent") == "video_9x16"]
     assert frames and frames[-1]["done"] == frames[-1]["total"]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("style", ["cqt", "spectrum", "waves", "vectorscope", "freqs", "histogram", "spatial"])
+def test_ffmpeg_styles_render(tracks, tmp_path, style):
+    out = tmp_path / f"{style}.mp4"
+    r = run([sys.executable, "ffmpeg_visualize.py", str(tracks["techno"]), str(out), "--style", style,
+             "--format", "shorts", "--max-seconds", "3", "--glow", "--trails", "--title=-Test-"])
+    assert r.returncode == 0, r.stderr[-2000:]
+    info = json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                                      "stream=codec_type,width,height:format=duration", "-of", "json", str(out)],
+                                     capture_output=True, text=True).stdout)
+    v = next(st for st in info["streams"] if st["codec_type"] == "video")
+    assert (v["width"], v["height"]) == (1080, 1920)
+    assert any(st["codec_type"] == "audio" for st in info["streams"])
+    assert abs(float(info["format"]["duration"]) - 3.0) < 0.2
 
 
 @pytest.mark.slow
