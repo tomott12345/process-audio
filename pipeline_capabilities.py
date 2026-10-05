@@ -14,18 +14,20 @@ Usage:
 How a caller turns form values into a command line (all of it is data
 below, nothing is implied):
   argv = [python, <script>, <input>]
-  + [type.param, <type>]                       if the pipeline has types
+  + "type.param=<type>"                        if the pipeline has types
   + for each option the user CHANGED from its default (per-type default
     first, then the plain default), skipping options whose applies_to /
     requires_option / requires_output don't hold:
         bool    value true  -> flag_true  (if set)   value false -> flag_false (if set)
-        number / choice / time / text  -> [flag, value]
-        text with flag_empty, set to ""  -> [flag_empty]
-        time_list -> [flag, v] repeated per value
-  + outputs: outputs_param  -> [outputs_param, "a,b,c"]
+        number / choice / time / text  -> "flag=value"
+        text with flag_empty, set to ""  -> flag_empty
+        time_list -> "flag=v" repeated per value
+  + outputs: outputs_param  -> "outputs_param=a,b,c"
              per-output flag_when_off -> that flag for each output NOT chosen
-  + formats: [formats_param, "wav24,mp3"]  when any chosen output has formats
-  + run.progress_flag, and --out-dir <job dir>
+  + formats: "formats_param=wav24,mp3"  when any chosen output has formats
+  + "--out-dir=<job dir>", and run.progress_flag
+Values always travel as ONE "--flag=value" token, so user text that
+starts with "-" (a title like "-Intro-") can't be mistaken for a flag.
 A plan (no rendering) is the same argv + plan_flags.
 
 Option fields:
@@ -441,7 +443,7 @@ def build_argv(caps: dict, pipeline_id: str, type_id: str | None, values: dict, 
     if pipe["type"]:
         if type_id not in {t["id"] for t in pipe["types"]}:
             raise ValueError(f"{pipe['type']['label']}: unknown type {type_id!r}")
-        argv += [pipe["type"]["param"], type_id]
+        argv.append(f"{pipe['type']['param']}={type_id}")
     elif type_id:
         raise ValueError(f"pipeline {pipeline_id!r} has no types")
     out_ids = {o["id"]: o for o in pipe["outputs"]}
@@ -476,25 +478,25 @@ def build_argv(caps: dict, pipeline_id: str, type_id: str | None, values: dict, 
                 raise ValueError(f"{o['id']}: expected a number")
             if ("min" in o and v < o["min"]) or ("max" in o and v > o["max"]):
                 raise ValueError(f"{o['id']}: {v} is outside {o.get('min')}..{o.get('max')}")
-            argv += [o["flag"], f"{v:g}"]
+            argv.append(f"{o['flag']}={v:g}")
         elif kind == "choice":
             if str(v) not in {c["value"] for c in o["choices"]}:
                 raise ValueError(f"{o['id']}: {v!r} is not one of the choices")
-            argv += [o["flag"], str(v)]
+            argv.append(f"{o['flag']}={v}")
         elif kind == "time":
             if v in (None, ""):
                 continue
-            argv += [o["flag"], str(v)]
+            argv.append(f"{o['flag']}={v}")
         elif kind == "time_list":
             for item in v or []:
-                argv += [o["flag"], str(item)]
+                argv.append(f"{o['flag']}={item}")
         elif kind == "text":
             if v == "" and o.get("flag_empty"):
                 argv.append(o["flag_empty"])
             elif v != "":
-                argv += [o["flag"], str(v)]
+                argv.append(f"{o['flag']}={v}")
     if pipe["outputs_param"]:
-        argv += [pipe["outputs_param"], ",".join(outputs)]
+        argv.append(f"{pipe['outputs_param']}={','.join(outputs)}")
     for o in pipe["outputs"]:
         if o.get("flag_when_off") and o["id"] not in outputs:
             argv.append(o["flag_when_off"])
@@ -505,8 +507,8 @@ def build_argv(caps: dict, pipeline_id: str, type_id: str | None, values: dict, 
                 raise ValueError(f"format {f!r} unavailable")
         if not formats:
             raise ValueError("choose at least one audio format")
-        argv += [pipe["formats_param"], ",".join(formats)]
-    argv += [caps["run"]["out_dir_flag"], out_dir]
+        argv.append(f"{pipe['formats_param']}={','.join(formats)}")
+    argv.append(f"{caps['run']['out_dir_flag']}={out_dir}")
     if plan:
         argv += caps["run"]["plan_flags"]
     elif progress:

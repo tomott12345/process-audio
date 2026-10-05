@@ -132,11 +132,19 @@ def test_every_option_flag_is_accepted(caps, tracks, tmp_path, pid, oid):
     inp = {"music": tracks["techno"], "nature": tracks["rain"], "speech": tracks["speech"]}[pid]
     argv = pc.build_argv(caps_check, pid, type_id, values, outputs, list(p["default_formats"]),
                          str(inp), str(tmp_path / "out"), plan=True)
-    flags = [x for x in argv if x.startswith("--")]
+    flags = [x.split("=", 1)[0] for x in argv if x.startswith("--")]
     assert any(o.get(k) in flags for k in ("flag", "flag_true", "flag_false", "flag_empty")), argv
     r = run(argv, timeout=300)
     assert r.returncode == 0, f"{argv}\n{r.stderr[-2000:]}"
     json.loads(r.stdout)  # --json: stdout is exactly one JSON document
+
+
+def test_dash_leading_text_is_one_token(caps, tmp_path):
+    argv = pc.build_argv(caps, "speech", None, {"title": "-Intro-"}, ["master"], ["wav24"], "x.wav",
+                         str(tmp_path), plan=True)
+    assert "--title=-Intro-" in argv
+    r = run(argv)
+    assert r.returncode == 0, r.stderr
 
 
 def test_build_argv_rejects_bad_input(caps):
@@ -158,12 +166,12 @@ def test_inactive_options_are_not_sent(caps):
     # dynamic EQ exists only for techno; emoji only matters on radial style
     argv = pc.build_argv(caps, "music", "ambient", {"dynamic_eq": False, "emoji": "⭐"},
                          ["master", "video_9x16"], ["wav24"], "i", "o")
-    assert "--no-dynamic-eq" not in argv and "--emoji" not in argv
+    assert "--no-dynamic-eq" not in argv and not any(a.startswith("--emoji") for a in argv)
     argv = pc.build_argv(caps, "music", "techno", {"dynamic_eq": False}, ["master"], ["wav24"], "i", "o")
     assert "--no-dynamic-eq" in argv
     # video-only options are dropped when no video is requested
     argv = pc.build_argv(caps, "music", "trap", {"symmetry": 6}, ["master"], ["wav24"], "i", "o")
-    assert "--symmetry" not in argv
+    assert not any(a.startswith("--symmetry") for a in argv)
 
 
 def test_release_outputs_select_steps(caps):

@@ -60,6 +60,30 @@ became `pipeline_capabilities.py` (it covers all three pipelines), and
 the waveform comes from `audio_peaks.py` rather than from the music
 analysis.
 
+## Phase 2 (done): the Go server
+
+`web/` (see `web/README.md`). The server is standard library only, one
+binary, and loopback-only until phase 5. It covers:
+- **Capabilities:** cached, and reloaded when a recipe file changes.
+- **Command lines:** the argv builder is a port of the Python one. A test
+  runs 675 generated cases through both and requires 663 identical command
+  lines and 12 agreed rejections.
+- **Uploads:** streamed to disk, checked by RIFF/WAVE header, probed with
+  ffprobe, mono/stereo only.
+- **Waveform and analysis:** peaks and analysis endpoints, both cached.
+- **Plans:** `--plan-only --json` previews.
+- **Jobs:** a queue with job state persisted to disk (jobs survive a
+  restart, and unfinished ones are marked "interrupted").
+- **Live progress:** server-sent events with step progress (including
+  video frames) and log lines.
+- **Cancel:** process-group cancel; a test checks that a canceled video
+  render leaves no processes behind.
+- **Downloads:** files served only from the job's own manifest, after a
+  symlink-safe check that they live inside the job folder. Range requests
+  work for in-page players, and there's a zip of everything.
+- **Security:** CSP and other security headers, plus a same-origin check
+  and a custom header on every state-changing request.
+
 ## What the user sees
 
 Five steps in a single page. Each step unlocks the next. First, pick

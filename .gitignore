@@ -16,3 +16,7 @@ __pycache__/
 *.mp4
 *.mov
 *.aiff
+
+# web app runtime data (uploads, jobs)
+web/data/
+web/bin/

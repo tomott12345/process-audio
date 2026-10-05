@@ -481,6 +481,7 @@ Run `python3 visualize_wav.py --help` for the full flag list and defaults.
 - `audio_peaks.py` -- waveform overview JSON for any audio file
 - `tests/` -- pipeline contract + render tests; synthetic test audio generator
 - `WEB_APP_PLAN.md` -- plan for the Go web front end
+- `web/` -- the Go web app (API server; browser UI in progress) -- see `web/README.md`
 - `music_recipes.json` -- music: per-genre recipes and loudness presets
 - `recipes.json` -- per-label EQ chains, loudness targets, loop policy,
   clean-run detector tuning
