@@ -33,3 +33,9 @@ demucs
 # PATH (not a pip package).
 librosa>=0.10
 pillow>=10
+
+# Music scripts (music_analyze.py, process_music_wav.py, pick_clip.py,
+# release.py) use the same librosa as visualize_wav.py above for tempo,
+# key, and section analysis -- no extra install beyond that line.
+# music_analyze.py --png (optional one-page analysis chart) also needs:
+matplotlib>=3.7

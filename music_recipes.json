@@ -1,0 +1,109 @@
+{
+  "$comment": "Per-genre recipes and platform loudness presets for the music scripts (music_analyze.py, process_music_wav.py, pick_clip.py, release.py). Same rules as recipes.json: a genre missing a required key makes the scripts refuse to run, and every genre is flagged \"untested\": true until it has been A/B'd against real Bluebox mixes at matched loudness. The preset sets the loudness target; the genre sets the sound.",
+
+  "presets": {
+    "youtube": {
+      "target_i": -14.0,
+      "target_tp": -1.0,
+      "note": "YouTube's commonly-cited loudness reference -- louder uploads are turned down, so going hotter gains nothing. -1 dBTP leaves room for the AAC re-encode's inter-sample overs."
+    },
+    "instagram": {
+      "target_i": -14.0,
+      "target_tp": -1.0,
+      "untested": true,
+      "note": "Instagram publishes no loudness target -- treated like YouTube until measured. Upload a private test Reel, download it back, and run music_analyze.py on it before trusting this number."
+    }
+  },
+
+  "genres": {
+    "ambient": {
+      "untested": true,
+      "tempo_range": [60, 120],
+      "expect_grid": false,
+      "phrase_bars": 8,
+      "highpass_hz": 25,
+      "mono_bass_hz": 100,
+      "eq": "equalizer=f=300:t=q:w=1.0:g=-1.0,highshelf=f=10000:g=1.0",
+      "dynamic_eq": null,
+      "glue": {"threshold_db": -20, "ratio": 1.5, "attack_ms": 40, "release_ms": 400, "knee_db": 6},
+      "softclip": null,
+      "width": 1.0,
+      "loudness_offset_lu": -2.0,
+      "fade_in": 2.0,
+      "fade_out": 4.0,
+      "clip_fade_in": 1.5,
+      "clip_fade_out": 2.5,
+      "tilt_reference_db_per_octave": null,
+      "visual_style": "glowburst",
+      "visual_args": [],
+      "hashtags": ["#ambient", "#ambientmusic", "#drone", "#synth", "#dawless"]
+    },
+    "trap": {
+      "untested": true,
+      "tempo_range": [65, 80],
+      "grid_subdivision": 2,
+      "expect_grid": true,
+      "phrase_bars": 4,
+      "highpass_hz": 25,
+      "mono_bass_hz": 100,
+      "eq": "equalizer=f=300:t=q:w=1.2:g=-1.5,highshelf=f=10000:g=1.0",
+      "dynamic_eq": null,
+      "glue": {"threshold_db": -16, "ratio": 2.0, "attack_ms": 10, "release_ms": 120, "knee_db": 6},
+      "softclip": {"type": "tanh", "threshold_db": 0.0},
+      "width": 1.0,
+      "loudness_offset_lu": 0.0,
+      "fade_in": 0.01,
+      "fade_out": 0.5,
+      "clip_fade_in": 0.02,
+      "clip_fade_out": 1.0,
+      "tilt_reference_db_per_octave": null,
+      "visual_style": "radial",
+      "visual_args": ["--emoji", "🔥"],
+      "hashtags": ["#trap", "#trapbeats", "#808", "#beatmaker", "#dawless"]
+    },
+    "techno": {
+      "untested": true,
+      "tempo_range": [120, 140],
+      "expect_grid": true,
+      "phrase_bars": 8,
+      "highpass_hz": 28,
+      "mono_bass_hz": 120,
+      "eq": "equalizer=f=300:t=q:w=1.0:g=-1.5,highshelf=f=10000:g=1.0",
+      "dynamic_eq": "adynamicequalizer=dfrequency=1500:dqfactor=1.2:tfrequency=1500:tqfactor=1.2:mode=cutabove:auto=adaptive:ratio=2:range=6",
+      "glue": {"threshold_db": -18, "ratio": 2.0, "attack_ms": 30, "release_ms": 150, "knee_db": 6},
+      "softclip": {"type": "tanh", "threshold_db": 0.0},
+      "width": 1.0,
+      "loudness_offset_lu": 0.0,
+      "fade_in": 0.01,
+      "fade_out": 1.0,
+      "clip_fade_in": 0.02,
+      "clip_fade_out": 1.5,
+      "tilt_reference_db_per_octave": null,
+      "visual_style": "bars",
+      "visual_args": [],
+      "hashtags": ["#techno", "#technomusic", "#hardwaretechno", "#acid", "#dawless"]
+    },
+    "psytrance": {
+      "untested": true,
+      "tempo_range": [138, 150],
+      "expect_grid": true,
+      "phrase_bars": 8,
+      "highpass_hz": 28,
+      "mono_bass_hz": 150,
+      "eq": "equalizer=f=250:t=q:w=1.0:g=-1.0,highshelf=f=9000:g=1.0",
+      "dynamic_eq": null,
+      "glue": {"threshold_db": -16, "ratio": 2.0, "attack_ms": 5, "release_ms": 60, "knee_db": 4},
+      "softclip": {"type": "tanh", "threshold_db": 0.0},
+      "width": 1.0,
+      "loudness_offset_lu": 0.0,
+      "fade_in": 0.01,
+      "fade_out": 1.0,
+      "clip_fade_in": 0.02,
+      "clip_fade_out": 1.5,
+      "tilt_reference_db_per_octave": null,
+      "visual_style": "radial",
+      "visual_args": ["--symmetry", "8"],
+      "hashtags": ["#psytrance", "#psy", "#trance", "#goa", "#dawless"]
+    }
+  }
+}

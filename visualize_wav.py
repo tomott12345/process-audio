@@ -41,6 +41,9 @@ Usage:
   python3 visualize_wav.py input.wav output.mp4 --format shorts --title "Contemplation"
   python3 visualize_wav.py input.wav output.mp4 --format shorts --symmetry 6
   python3 visualize_wav.py input.wav output.mp4 --format shorts --no-particles --no-beat-punch --symmetry 1
+  python3 visualize_wav.py master.wav output.mp4 --format landscape --grid music_analysis.json
+    (--grid: lock beat punch / emoji pulse to a music_analyze.py beat grid
+    and flash on drops; see release.py for the one-command music flow)
 
 Styles:
   radial     spectrum bars pulsing outward from a center ring (default)
@@ -118,6 +121,54 @@ def build_pulse_envelope(onset_frames, n_frames, decay=0.72):
     for i in range(1, n_frames):
         env[i] = max(env[i], env[i - 1] * decay)
     return env
+
+
+def grid_envelopes(grid_path, n_frames, fps):
+    """Beat-locked replacements for the onset-detected envelopes, from a
+    music_analysis.json / clip_*_grid.json (music_analyze.py, pick_clip.py).
+    Onset detection jitters on busy trap hats and psy 16th-note basslines;
+    the analyzed grid doesn't. Returns (punch_env, kick_env, flash_env) or
+    None when the file has no beat grid (ambient) -- the caller then keeps
+    onset detection.
+
+    punch: a pulse on every beat (downbeats 1.0, other beats 0.6), scaled by
+    section -- full in drops, calmer in intros/breakdowns. kick: the same
+    beats with a slower decay (drives the emoji). flash: a white flash on
+    each drop's first downbeat."""
+    import json
+
+    with open(grid_path) as f:
+        a = json.load(f)
+    if not a.get("tempo", {}).get("has_grid"):
+        return None
+    g = a["grid"]
+    downs = set(round(t, 3) for t in g.get("downbeats", []))
+    scale = {"drop": 1.0, "build": 0.85, "groove": 0.75, "intro": 0.6, "outro": 0.6, "breakdown": 0.35}
+
+    def section_scale(t):
+        for sec in a.get("sections", []):
+            if sec["start"] <= t < sec["end"]:
+                return scale.get(sec["label"], 0.7)
+        return 0.7
+
+    def pulses(times, amps, decay):
+        env = np.zeros(n_frames, dtype=np.float32)
+        for t, amp in zip(times, amps):
+            fi = int(round(t * fps))
+            if 0 <= fi < n_frames:
+                env[fi] = max(env[fi], amp)
+        for i in range(1, n_frames):
+            env[i] = max(env[i], env[i - 1] * decay)
+        return env
+
+    beats = g.get("beats", [])
+    amps = [(1.0 if round(t, 3) in downs else 0.6) * section_scale(t) for t in beats]
+    punch = pulses(beats, amps, 0.72)
+    kick = pulses(beats, [min(1.0, x / 0.85) for x in amps], 0.8)
+    flash = pulses(a.get("drops", []), [1.0] * len(a.get("drops", [])), 0.85)
+    # the drop hit itself gets a bigger zoom than an ordinary downbeat
+    punch = np.maximum(punch, 1.6 * flash)
+    return punch, kick, flash
 
 
 def load_features(wav_path, fps, n_bands=48, sr_target=22050, kick_fmax=200.0):
@@ -787,6 +838,7 @@ def main():
     ap.add_argument("--emoji-size", type=float, default=0.22, help="base emoji size as a fraction of min(width,height) (default 0.22)")
     ap.add_argument("--emoji-pulse", type=float, default=0.5, help="extra size fraction at peak beat strength (default 0.5, i.e. up to +50%% on a hard hit)")
     ap.add_argument("--kick-fmax", type=float, default=200.0, help="Hz cutoff for what counts as 'kick drum' when --emoji-beat kick (default 200)")
+    ap.add_argument("--grid", default=None, help="music_analysis.json (or a pick_clip.py clip_*_grid.json) for THIS audio: lock beat punch / emoji pulse to the analyzed beat grid and flash on drops. Falls back to onset detection when the file has no grid (ambient).")
     args = ap.parse_args()
 
     if shutil.which("ffmpeg") is None:
@@ -810,6 +862,15 @@ def main():
     mel_db, rms, punch_env, kick_env, n_frames, duration, y, sr = load_features(
         args.wav_path, args.fps, args.bands, kick_fmax=args.kick_fmax
     )
+
+    flash_env = None
+    if args.grid:
+        envs = grid_envelopes(args.grid, n_frames, args.fps)
+        if envs is None:
+            print(f"Note: {args.grid} has no beat grid (beatless track) -- keeping onset detection.", file=sys.stderr)
+        else:
+            punch_env, kick_env, flash_env = envs
+            print(f"Beat-locked to {args.grid}")
 
     if args.max_seconds:
         n_frames = min(n_frames, int(args.max_seconds * args.fps))
@@ -849,7 +910,11 @@ def main():
         "-i", "-",
         "-i", args.wav_path,
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "20",
-        "-c:a", "aac", "-b:a", "192k",
+        "-r", str(args.fps),
+        # upload-safe: 48k/320k AAC (YouTube and Instagram both re-encode,
+        # so start from the best source), moov atom up front for streaming
+        "-c:a", "aac", "-b:a", "320k", "-ar", "48000",
+        "-movflags", "+faststart",
         "-shortest",
         args.out_path,
     ]
@@ -902,6 +967,9 @@ def main():
 
             if beat_punch_on:
                 frame_img = apply_beat_punch(frame_img, float(punch_env[i]) if i < len(punch_env) else 0.0, args.punch_strength, w, h)
+
+            if flash_env is not None and i < len(flash_env) and flash_env[i] > 0.02:
+                frame_img = Image.blend(frame_img, Image.new("RGB", (w, h), (255, 255, 255)), 0.35 * float(flash_env[i]))
 
             if args.title:
                 frame_img = draw_title(frame_img, args.title, font, w, h)
