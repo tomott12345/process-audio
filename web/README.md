@@ -32,6 +32,10 @@ login for network access and data cleanup are phase 5.
 The **Jobs** panel lists every run, survives restarts, and can delete old
 jobs and their files.
 
+![The web app: upload and waveform](../docs/images/web-1-upload.png)
+
+More screenshots, one per step, are in the [main README](../README.md#web-app).
+
 ## Run
 
 ```bash

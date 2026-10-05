@@ -1,13 +1,84 @@
 # process-audio
 
-A small ffmpeg/Python pipeline that turns raw field recordings (rain, thunder,
-crickets/insects, birds, brooks, waterfalls, mixed ambience) into cleaned,
-loudness-normalized "long" and "Short" masters for YouTube -- optionally
-muxed with a still image into ready-to-upload MP4s.
+ffmpeg/Python pipelines for three kinds of audio, plus a browser app to run them:
 
-It never deletes your source file, never guesses an EQ recipe for content it
-doesn't recognize, and keeps the tunable parts (EQ chains, loudness targets,
-clean-run detection thresholds) in `recipes.json` rather than buried in code.
+- **Music** -- Bluebox mixes and finished tracks (ambient, trap, techno,
+  psytrance): tempo/key/drop analysis, genre mastering for YouTube and
+  Instagram, a Short/Reel cut around the drop, beat-locked visualizer
+  videos, and captions.
+- **Nature** -- raw field recordings (rain, thunder, insects, birds,
+  brooks, waterfalls, mixed ambience) turned into cleaned,
+  loudness-normalized "long" and "Short" masters for YouTube, optionally
+  muxed with a still image into ready-to-upload MP4s.
+- **Speech** -- interviews and podcasts, cleaned and leveled to a platform
+  loudness target.
+
+Every pipeline can write WAV 24-bit, WAV 16-bit, FLAC, and MP3. None of
+them deletes your source file or guesses a recipe for content it doesn't
+recognize. The tunable parts (EQ chains, loudness targets, detection
+thresholds) live in `recipes.json` and `music_recipes.json`, not in code.
+
+## Web app
+
+`web/` is a Go server with a browser front end for all three pipelines.
+Upload a WAV, pick what it is, choose options and outputs, then watch it
+run and download the results. It runs locally; your audio never leaves the
+machine.
+
+```bash
+cd web
+go build -o bin/paweb ./cmd/paweb
+bin/paweb                      # then open http://127.0.0.1:8765
+```
+
+Needs Go 1.24+, plus the same Python and ffmpeg setup as the scripts
+(see Requirements below). Full details are in [web/README.md](web/README.md).
+
+**1. Pick the kind of audio and drop in the WAV.** Length, format, and the
+waveform appear straight away. Once a music file is analyzed, its sections
+(intro / build / drop / outro) are shaded and the main drop is marked.
+
+![Pipeline choice and upload with the waveform](docs/images/web-1-upload.png)
+
+**2. Pick the type.** Music and nature files are analyzed automatically:
+tempo, key (with Camelot), loudness, true peak, the main drop, and plain
+warnings such as bass that will vanish on phone speakers.
+
+![Music type cards and the analysis](docs/images/web-2-analysis.png)
+
+**3. Options.** The everyday settings are always visible. Everything else
+is under **Advanced**, collapsed by default. Each option starts at the
+recipe's default for the chosen type. Changed ones are highlighted with a
+*reset* link, and options that don't apply are hidden or greyed out with
+the reason.
+
+![Options, with Advanced open](docs/images/web-3-options.png)
+
+**4. Outputs and formats.** Choose what you want back: mastered audio in
+any mix of WAV 24/16-bit, FLAC, and MP3; the Short/Reel clip; YouTube
+16:9, Short/Reel 9:16, and Instagram 1:1 videos; captions; the analysis.
+
+![Output and format choices](docs/images/web-4-outputs.png)
+
+**5. Show plan** lists exactly what will run before anything renders.
+
+![The plan preview](docs/images/web-5-plan.png)
+
+**6. Run.** Progress streams live, including frame-by-frame percentages
+while videos render, and you can cancel at any point.
+
+![A job running](docs/images/web-6-progress.png)
+
+**7. Results.** Players for every audio and video file, captions with a
+Copy button, the analysis chart, per-file downloads, and a zip of
+everything. **Edit & run again** loads the job back into the form.
+
+![Results: audio, video, captions, and analysis](docs/images/web-7-results.png)
+
+It works on a phone, and follows your light/dark setting (the screenshots
+are dark).
+
+<img src="docs/images/web-8-phone.png" alt="The app at phone width" width="300">
 
 ## Requirements
 
@@ -481,7 +552,8 @@ Run `python3 visualize_wav.py --help` for the full flag list and defaults.
 - `audio_peaks.py` -- waveform overview JSON for any audio file
 - `tests/` -- pipeline contract + render tests; synthetic test audio generator
 - `WEB_APP_PLAN.md` -- plan for the Go web front end
-- `web/` -- the Go web app (API server; browser UI in progress) -- see `web/README.md`
+- `web/` -- the Go web app (API server + browser UI) -- see `web/README.md`
+- `docs/images/` -- screenshots used in this README
 - `music_recipes.json` -- music: per-genre recipes and loudness presets
 - `recipes.json` -- per-label EQ chains, loudness targets, loop policy,
   clean-run detector tuning
