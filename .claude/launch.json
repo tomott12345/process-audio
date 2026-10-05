@@ -1,0 +1,16 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "process-audio web (go)",
+      "runtimeExecutable": "web/bin/paweb",
+      "runtimeArgs": [
+        "-addr",
+        "127.0.0.1:8765",
+        "-repo",
+        "/Users/tott/Documents/GitHub/process-audio"
+      ],
+      "port": 8765
+    }
+  ]
+}

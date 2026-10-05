@@ -28,6 +28,14 @@ Chain (every step set by the genre recipe in music_recipes.json):
        master_16bit_44k1.wav -- triangular high-pass dithered 16-bit
      Both tagged with title/artist/genre and BPM/key in the comment.
 
+Every step can be switched or tuned from the command line, overriding the
+genre recipe for this run only: --no-eq, --no-dynamic-eq, --no-glue,
+--no-mono-bass / --mono-bass-hz, --highpass-hz, --width, --softclip /
+--no-softclip / --softclip-threshold, --fade-in, --fade-out.
+--formats picks the deliverables (wav24, wav16, flac, mp3; default
+wav24,wav16). --plan-only --json prints the resolved plan as JSON;
+--progress-json emits machine-readable progress (see pipeline_io.py).
+
 --genre is required (not guessed); --preset picks the loudness target
 (youtube / instagram -- see music_recipes.json for the numbers and how
 much to trust them). Ambient deliberately lands below the preset target
@@ -51,6 +59,10 @@ from pathlib import Path
 from music_common import (
     astats, die, ebur128, ffmpeg_to, ffmpeg_version, fmt_time, genre_recipe,
     load_recipes, parse_timestamp, preflight, probe, write_json,
+)
+from pipeline_io import (
+    AUDIO_FORMATS, emit, emit_manifest, emit_output, emit_plan, enable_progress,
+    export_formats, json_mode, parse_formats, print_json,
 )
 
 REQUIRED_FILTERS = (
@@ -83,15 +95,18 @@ def tone_graph(recipe: dict, width: float, no_mono_bass: bool) -> str:
             f"[hi]anull{hi_tail}[hiw];"
             "[lom][hiw]amix=inputs=2:normalize=0[pre]"
         )
-    chain = [recipe["eq"]]
+    chain = []
+    if recipe.get("eq"):
+        chain.append(recipe["eq"])
     if recipe.get("dynamic_eq"):
         chain.append(recipe["dynamic_eq"])
-    g = recipe["glue"]
-    chain.append(
-        f"acompressor=threshold={g['threshold_db']}dB:ratio={g['ratio']}:attack={g['attack_ms']}"
-        f":release={g['release_ms']}:knee={10 ** (g['knee_db'] / 20):.3f}:makeup=1"
-    )
-    return head + ";[pre]" + ",".join(chain) + "[tone]"
+    g = recipe.get("glue")
+    if g:
+        chain.append(
+            f"acompressor=threshold={g['threshold_db']}dB:ratio={g['ratio']}:attack={g['attack_ms']}"
+            f":release={g['release_ms']}:knee={10 ** (g['knee_db'] / 20):.3f}:makeup=1"
+        )
+    return head + ";[pre]" + (",".join(chain) or "anull") + "[tone]"
 
 
 def loud_chain(gain_db: float, recipe: dict, ceiling_db: float, use_softclip: bool) -> str:
@@ -125,7 +140,7 @@ def render(cmd_graph: str | None, cmd_af: str | None, src: Path, dst: Path, extr
     ffmpeg_to(cmd, tmp, dst)
 
 
-def tags_for(args, analysis: dict | None, genre: str) -> list[str]:
+def tags_for(args, analysis: dict | None, genre: str) -> dict[str, str]:
     comment = [f"genre={genre}"]
     if analysis:
         t, k = analysis["tempo"], analysis["key"]
@@ -133,12 +148,7 @@ def tags_for(args, analysis: dict | None, genre: str) -> list[str]:
             comment.append(f"bpm={t['bpm']:g}")
         if k.get("name"):
             comment.append(f"key={k['name']} ({k['camelot']})")
-    meta = ["-metadata", f"genre={genre}", "-metadata", "comment=" + "; ".join(comment)]
-    if args.title:
-        meta += ["-metadata", f"title={args.title}"]
-    if args.artist:
-        meta += ["-metadata", f"artist={args.artist}"]
-    return meta
+    return {"genre": genre, "comment": "; ".join(comment), "title": args.title or "", "artist": args.artist or ""}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -155,17 +165,78 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--width", type=float, help="Side level above the mono-bass crossover (1.0 = unchanged; overrides the recipe)")
     p.add_argument("--no-mono-bass", action="store_true", help="Skip folding the low end to mono")
     p.add_argument("--no-softclip", action="store_true", help="Skip the soft-clipper even if the genre recipe uses one")
+    p.add_argument("--softclip", action="store_true", help="Use the soft-clipper even if the genre recipe doesn't (e.g. ambient)")
+    p.add_argument("--softclip-threshold", type=float, help="Soft-clip threshold in dBFS (-6..0; default from the recipe, else 0)")
+    p.add_argument("--no-eq", action="store_true", help="Skip the recipe's tonal EQ")
+    p.add_argument("--no-dynamic-eq", action="store_true", help="Skip the recipe's dynamic EQ (if it has one)")
+    p.add_argument("--no-glue", action="store_true", help="Skip glue compression")
+    p.add_argument("--mono-bass-hz", type=float, help="Mono-bass crossover in Hz (60-250; overrides the recipe)")
+    p.add_argument("--highpass-hz", type=float, help="Subsonic high-pass in Hz (10-60; overrides the recipe)")
+    p.add_argument("--fade-in", type=float, help="Fade-in seconds (overrides the recipe)")
+    p.add_argument("--fade-out", type=float, help="Fade-out seconds (overrides the recipe)")
+    p.add_argument("--formats", type=parse_formats, default=("wav24", "wav16"),
+                   help=f"Comma-separated deliverables: {', '.join(AUDIO_FORMATS)} (default: wav24,wav16)")
     p.add_argument("--analysis", type=Path, help="music_analysis.json to take BPM/key tags from (default: analyze the input)")
     p.add_argument("--no-analysis", action="store_true", help="Skip analysis (no BPM/key tags, no post-master QC report)")
     p.add_argument("--out-dir", type=Path, help="Output folder (default: <stem>_music/)")
     p.add_argument("--plan-only", action="store_true", help="Print the resolved chain and targets, then exit without rendering")
+    p.add_argument("--json", action="store_true", help="With --plan-only: print the plan as one JSON document")
+    p.add_argument("--progress-json", action="store_true", help="Emit machine-readable progress lines (see pipeline_io.py)")
     return p
+
+
+def apply_overrides(recipe: dict, args) -> dict:
+    """The genre recipe with this run's command-line overrides applied --
+    a copy; music_recipes.json is never touched."""
+    def check(name, val, lo, hi):
+        if val is not None and not (lo <= val <= hi):
+            die(f"--{name} {val:g} is out of range ({lo:g}..{hi:g})", 2)
+
+    check("mono-bass-hz", args.mono_bass_hz, 60, 250)
+    check("highpass-hz", args.highpass_hz, 10, 60)
+    check("softclip-threshold", args.softclip_threshold, -6, 0)
+    check("fade-in", args.fade_in, 0, 30)
+    check("fade-out", args.fade_out, 0, 60)
+    check("width", args.width, 0.5, 2.0)
+    if args.softclip and args.no_softclip:
+        die("pass --softclip or --no-softclip, not both", 2)
+    r = dict(recipe)
+    if args.mono_bass_hz is not None:
+        r["mono_bass_hz"] = args.mono_bass_hz
+    if args.highpass_hz is not None:
+        r["highpass_hz"] = args.highpass_hz
+    if args.fade_in is not None:
+        r["fade_in"] = args.fade_in
+    if args.fade_out is not None:
+        r["fade_out"] = args.fade_out
+    if args.no_eq:
+        r["eq"] = None
+    if args.no_dynamic_eq:
+        r["dynamic_eq"] = None
+    if args.no_glue:
+        r["glue"] = None
+    if args.no_softclip:
+        r["softclip"] = None
+    elif args.softclip or args.softclip_threshold is not None:
+        base = dict(recipe.get("softclip") or {"type": "tanh", "threshold_db": 0.0})
+        if args.softclip_threshold is not None:
+            base["threshold_db"] = args.softclip_threshold
+        r["softclip"] = base
+    if args.width is not None:
+        r["width"] = args.width
+    return r
 
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.json and not args.plan_only:
+        die("--json only applies to --plan-only", 2)
+    if args.json:
+        json_mode()
+    if args.progress_json:
+        enable_progress()
     recipes = load_recipes()
-    recipe = genre_recipe(recipes, args.genre)
+    recipe = apply_overrides(genre_recipe(recipes, args.genre), args)
     if args.preset not in recipes["presets"]:
         die(f"unknown preset {args.preset!r}; known: {', '.join(sorted(recipes['presets']))}", 2)
     preset = recipes["presets"][args.preset]
@@ -173,8 +244,8 @@ def main() -> int:
         0.0 if args.target_i is not None else recipe["loudness_offset_lu"]
     )
     tp = args.target_tp if args.target_tp is not None else preset["target_tp"]
-    width = args.width if args.width is not None else recipe["width"]
-    use_softclip = bool(recipe.get("softclip")) and not args.no_softclip
+    width = recipe["width"]
+    use_softclip = bool(recipe.get("softclip"))
     graph = tone_graph(recipe, width, args.no_mono_bass)
 
     plan = [
@@ -185,8 +256,29 @@ def main() -> int:
         f"tone graph: {graph}",
         f"loudness: static gain -> {'softclip ' + json.dumps(recipe['softclip']) + ' -> ' if use_softclip else ''}"
         f"limiter at {tp - TP_MARGIN_DB:g} dBFS (4x oversampled)",
+        f"steps: eq={'on' if recipe.get('eq') else 'off'}  dynamic_eq={'on' if recipe.get('dynamic_eq') else 'off'}  "
+        f"glue={'on' if recipe.get('glue') else 'off'}  highpass={recipe['highpass_hz']:g} Hz",
         f"fades: in {recipe['fade_in']}s  out {recipe['fade_out']}s",
+        f"formats: {','.join(args.formats)}",
     ]
+    if args.plan_only and args.json:
+        print_json({
+            "pipeline": "music", "script": "process_music_wav.py", "genre": args.genre,
+            "untested_recipe": bool(recipe.get("untested")),
+            "preset": args.preset, "target_i": target_i, "target_tp": tp,
+            "steps": {
+                "highpass_hz": recipe["highpass_hz"],
+                "mono_bass_hz": None if args.no_mono_bass else recipe["mono_bass_hz"],
+                "width": width, "eq": recipe.get("eq"), "dynamic_eq": recipe.get("dynamic_eq"),
+                "glue": recipe.get("glue"), "softclip": recipe.get("softclip") if use_softclip else None,
+                "limiter_ceiling_dbfs": round(tp - TP_MARGIN_DB, 2),
+                "fade_in": recipe["fade_in"], "fade_out": recipe["fade_out"],
+            },
+            "filter_graph": graph, "formats": list(args.formats),
+            "trim": {"start": args.start, "end": args.end},
+            "lines": plan,
+        })
+        return 0
     if args.plan_only:
         print("=== PLAN ONLY (no rendering) ===")
         print("\n".join(plan))
@@ -214,6 +306,9 @@ def main() -> int:
         f"source={src}",
     ] + plan
 
+    emit_plan([("master", "Mastering"), ("deliverables", "Writing audio formats")]
+              + ([] if args.no_analysis else [("qc", "Checking the master")]))
+    emit("step_start", step="master", label="Mastering")
     # 0. trim (sample-accurate, before anything else)
     cur = src
     if args.start is not None or args.end is not None:
@@ -249,6 +344,8 @@ def main() -> int:
             f"  pass {attempt + 1}: gain {gain:+.2f} dB, ceiling {ceiling_db:.2f} dBFS -> "
             f"{m1['integrated_lufs']} LUFS, TP {m1['true_peak_dbtp']} dBTP"
         )
+        emit("progress", step="master", detail="loudness pass", done=attempt + 1, total=5,
+             lufs=m1["integrated_lufs"], true_peak=m1["true_peak_dbtp"])
         if abs(err) <= 0.3 and over <= 0.0:
             break
         if over > 0.0:
@@ -269,7 +366,9 @@ def main() -> int:
     if m1["true_peak_dbtp"] is not None and m1["true_peak_dbtp"] > tp + 0.05:
         report.append(f"WARNING: true peak {m1['true_peak_dbtp']} dBTP is above the {tp} ceiling")
 
+    emit("step_end", step="master")
     # 6. fades + deliverables (tags from the analysis)
+    emit("step_start", step="deliverables", label="Writing audio formats")
     analysis = None
     if args.analysis:
         analysis = json.loads(args.analysis.read_text())
@@ -282,15 +381,15 @@ def main() -> int:
     dur = probe(loud)["duration"]
     fi, fo = recipe["fade_in"], min(recipe["fade_out"], dur / 4)
     fades = f"afade=t=in:st=0:d={fi},afade=t=out:st={max(0.0, dur - fo):.4f}:d={fo}"
+    meta_args = [a for k, v in meta.items() if v for a in ("-metadata", f"{k}={v}")]
     m24 = out_dir / "master_24bit_48k.wav"
     tmp = m24.with_suffix(".tmp.wav")
+    # the 24-bit master is always written -- the clip, videos, and every
+    # other format are made from it -- but only announced if requested
     ffmpeg_to(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(loud), "-af", fades,
-               "-ar", "48000", "-c:a", "pcm_s24le", *meta, str(tmp)], tmp, m24)
-    m16 = out_dir / "master_16bit_44k1.wav"
-    tmp = m16.with_suffix(".tmp.wav")
-    ffmpeg_to(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(loud), "-af",
-               fades + ",aresample=44100:filter_size=64:cutoff=0.97:osf=s16:dither_method=triangular_hp",
-               "-c:a", "pcm_s16le", *meta, str(tmp)], tmp, m16)
+               "-ar", "48000", "-c:a", "pcm_s24le", *meta_args, str(tmp)], tmp, m24)
+    products = export_formats(m24, "master", args.formats, meta)
+    emit("step_end", step="deliverables")
 
     # post-master QC: the numbers that matter for upload
     fin = ebur128(m24)
@@ -301,6 +400,7 @@ def main() -> int:
     )
     qc = {}
     if analysis is not None:
+        emit("step_start", step="qc", label="Checking the master")
         from music_analyze import analyze
         qc = analyze(m24, args.genre, recipe)
         write_json(out_dir / "music_analysis.json", qc)
@@ -313,12 +413,22 @@ def main() -> int:
             report.append(f"tags: {qc['tempo']['bpm']:g} BPM, {qc['key']['name']} ({qc['key']['camelot']})")
         for f in qc["flags"]:
             report.append(f"flag: {f}")
-    report += [f"product={m24}", f"product={m16}"]
+        emit_output("analysis", out_dir / "music_analysis.json", "json")
+        emit("step_end", step="qc")
+    report += [f"product={pth}" for pth in products.values()]
     (out_dir / "REPORT.txt").write_text("\n".join(report) + "\n")
 
     print("\n=== REPORT ===")
     print("\n".join(report[3:]))
-    print(f"\nWrote {m24}\nWrote {m16}\nWrote {out_dir / 'REPORT.txt'}")
+    for pth in products.values():
+        print(f"Wrote {pth}")
+    print(f"Wrote {out_dir / 'REPORT.txt'}")
+    emit_output("report", out_dir / "REPORT.txt", "txt")
+    manifest = [{"kind": "master", "format": f, "path": pth} for f, pth in products.items()]
+    if qc:
+        manifest.append({"kind": "analysis", "format": "json", "path": out_dir / "music_analysis.json"})
+    manifest.append({"kind": "report", "format": "txt", "path": out_dir / "REPORT.txt"})
+    emit_manifest(manifest)
     return 0
 
 

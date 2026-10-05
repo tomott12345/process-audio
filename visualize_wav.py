@@ -93,6 +93,7 @@ Requires: librosa, numpy, pillow, and the ffmpeg binary on PATH.
 
 import argparse
 import colorsys
+import os
 import math
 import random
 import subprocess
@@ -101,6 +102,8 @@ import shutil
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
+from pipeline_io import PARENT_STEP_ENV, emit, enable_progress
 
 FORMATS = {
     "shorts": (1080, 1920),
@@ -839,7 +842,10 @@ def main():
     ap.add_argument("--emoji-pulse", type=float, default=0.5, help="extra size fraction at peak beat strength (default 0.5, i.e. up to +50%% on a hard hit)")
     ap.add_argument("--kick-fmax", type=float, default=200.0, help="Hz cutoff for what counts as 'kick drum' when --emoji-beat kick (default 200)")
     ap.add_argument("--grid", default=None, help="music_analysis.json (or a pick_clip.py clip_*_grid.json) for THIS audio: lock beat punch / emoji pulse to the analyzed beat grid and flash on drops. Falls back to onset detection when the file has no grid (ambient).")
+    ap.add_argument("--progress-json", action="store_true", help="emit machine-readable progress lines (see pipeline_io.py)")
     args = ap.parse_args()
+    if args.progress_json:
+        enable_progress()
 
     if shutil.which("ffmpeg") is None:
         sys.exit("ffmpeg not found on PATH. Install it (e.g. `brew install ffmpeg`) and retry.")
@@ -977,6 +983,9 @@ def main():
             proc.stdin.write(frame_img.tobytes())
             if i % (args.fps * 5) == 0:
                 print(f"  {t:6.1f}s / {duration:.1f}s")
+            if i % args.fps == 0 or i == n_frames - 1:
+                emit("progress", step=os.environ.get(PARENT_STEP_ENV, "video"), done=i + 1, total=n_frames,
+                     detail="frames")
     finally:
         proc.stdin.close()
         err = proc.stderr.read().decode(errors="ignore")

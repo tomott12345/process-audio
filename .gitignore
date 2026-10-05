@@ -1,6 +1,7 @@
 # OS / editor cruft
 .DS_Store
 __pycache__/
+.pytest_cache/
 *.pyc
 
 # Generated per-run outputs -- never commit personal recordings or renders
@@ -15,3 +16,7 @@ __pycache__/
 *.mp4
 *.mov
 *.aiff
+
+# web app runtime data (uploads, jobs)
+web/data/
+web/bin/
