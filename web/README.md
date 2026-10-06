@@ -38,6 +38,14 @@ More screenshots, one per step, are in the [main README](../README.md#web-app).
 
 ## Run
 
+The simplest way is the Docker image. See "Run it with Docker" in the
+[main README](../README.md#run-it-with-docker-easiest). Inside a container
+the server runs with `-container`, which allows listening on the
+container's interface. The port must then be published on the host's
+loopback only (`-p 127.0.0.1:8765:8765`), because there is no login yet.
+
+To run it directly:
+
 ```bash
 cd web
 go build -o bin/paweb ./cmd/paweb
@@ -55,6 +63,7 @@ Needs Go 1.24+, `python3` with the repo's dependencies, and
 | `-data` | `<repo>/web/data` | Uploads and jobs (git-ignored) |
 | `-workers` | `1` | Concurrent jobs; video renders already use every core |
 | `-max-upload-mb` | `2048` | A 45-minute 24-bit/48k stereo jam is ~780 MB |
+| `-container` | off | Inside a container: allow listening on all interfaces (publish on 127.0.0.1 only) |
 
 The first launch of a freshly built binary from another app (an IDE, the
 Claude preview pane) can be held at a macOS privacy prompt for access to

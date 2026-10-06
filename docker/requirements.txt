@@ -1,0 +1,21 @@
+# Python packages baked into the Docker image (see ../Dockerfile).
+#
+# Everything the web app can use except Demucs: the core analysis/DSP
+# stack, librosa for music analysis and the beat-locked visualizer, Pillow
+# for frames and title overlays, matplotlib for the analysis chart,
+# noisereduce for the nature pipeline's noise-profile cleanup, and pytest
+# so the image can check itself (docker run ... python3 -m pytest).
+#
+# Demucs (voice/footstep removal) pulls in torch -- several GB -- so it is
+# opt-in: docker build --build-arg WITH_DEMUCS=1 .
+#
+# Floors, not pins: the image is rebuilt and its tests run in CI, which is
+# what keeps these honest.
+numpy>=1.24
+scipy>=1.10
+librosa>=0.10
+soundfile>=0.12
+pillow>=10
+matplotlib>=3.7
+noisereduce>=3.0
+pytest>=7

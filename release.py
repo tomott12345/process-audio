@@ -66,6 +66,38 @@ from pipeline_io import (
     export_formats, format_path, json_mode, parse_formats, print_json,
 )
 
+BEAT_STYLES = ["radial", "bars", "glowburst", "wormhole"]
+FFMPEG_STYLES = ["cqt", "spectrum", "waves", "vectorscope", "freqs", "histogram", "spatial"]
+# release.py flag -> ffmpeg_visualize.py flag: (argparse dest, release flag, kind, visualizer flag)
+VIZ_PASSTHROUGH = (
+    ("viz_palette", "--viz-palette", str), ("viz_glow", "--viz-glow", bool),
+    ("viz_glow_strength", "--viz-glow-strength", float), ("viz_trails", "--viz-trails", bool),
+    ("viz_trails_decay", "--viz-trails-decay", float), ("viz_cqt_axis", "--viz-cqt-axis", bool),
+    ("viz_no_cqt_sonogram", "--viz-no-cqt-sonogram", bool), ("viz_spectrum_color", "--viz-spectrum-color", str),
+    ("viz_spectrum_slide", "--viz-spectrum-slide", str), ("viz_spectrum_speed", "--viz-spectrum-speed", str),
+    ("viz_spectrum_scale", "--viz-spectrum-scale", str), ("viz_spectrum_orientation", "--viz-spectrum-orientation", str),
+    ("viz_waves_mode", "--viz-waves-mode", str), ("viz_waves_split", "--viz-waves-split", bool),
+    ("viz_vectorscope_mode", "--viz-vectorscope-mode", str), ("viz_vectorscope_draw", "--viz-vectorscope-draw", str),
+    ("viz_vectorscope_zoom", "--viz-vectorscope-zoom", float), ("viz_freqs_mode", "--viz-freqs-mode", str),
+    ("viz_freqs_fscale", "--viz-freqs-fscale", str), ("viz_histogram_slide", "--viz-histogram-slide", str),
+    ("viz_histogram_dmode", "--viz-histogram-dmode", str), ("viz_spatial_win", "--viz-spatial-win", str),
+)
+
+
+def viz_args(args) -> list[str]:
+    """--viz-* flags -> ffmpeg_visualize.py flags (same names without the
+    prefix; --viz-no-cqt-sonogram -> --no-cqt-sonogram)."""
+    out: list[str] = []
+    for dest, flag, kind in VIZ_PASSTHROUGH:
+        val = getattr(args, dest)
+        target = "--" + flag[len("--viz-"):]
+        if kind is bool and val:
+            out.append(target)
+        elif kind is not bool and val is not None:
+            out.append(f"{target}={val:g}" if kind is float else f"{target}={val}")
+    return out
+
+
 DEFAULT_METHOD = "Hardware synths, recorded DAWless and mixed live on a 1010music Bluebox."
 OUTPUTS = {
     "master": "Mastered audio",
@@ -172,10 +204,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--loop-clip", action="store_true", help="Cut the Short/Reel as a seamless bar-exact loop")
     p.add_argument("--drop-at", type=parse_timestamp, help="Override the drop the clip is built around")
     p.add_argument("--clip-start", type=parse_timestamp, help="Pin the clip's start instead")
-    p.add_argument("--style", help="Visualizer style override (radial | bars | glowburst | wormhole)")
+    p.add_argument("--style", choices=BEAT_STYLES + FFMPEG_STYLES,
+                   help="Visualizer style: beat-locked (radial | bars | glowburst | wormhole, visualize_wav.py) "
+                        "or ffmpeg (cqt | spectrum | waves | vectorscope | freqs | histogram | spatial, "
+                        "ffmpeg_visualize.py); default: the genre's style")
     p.add_argument("--emoji", help="Center emoji (radial style); overrides the genre default")
     p.add_argument("--no-emoji", action="store_true", help="Drop the genre's default emoji")
     p.add_argument("--symmetry", type=int, help="Radial symmetry (1 = off); overrides the genre default")
+    v = p.add_argument_group("ffmpeg visualizer look (passed to ffmpeg_visualize.py; ffmpeg styles only)")
+    for dest, flag, kind in VIZ_PASSTHROUGH:
+        if kind is bool:
+            v.add_argument(flag, dest=dest, action="store_true")
+        else:
+            v.add_argument(flag, dest=dest, type=kind)
     p.add_argument("--square", action="store_true", help="Legacy: same as adding video_1x1 to the default outputs")
     p.add_argument("--no-landscape", action="store_true", help="Legacy: drop video_16x9 from the default outputs")
     p.add_argument("--max-seconds", type=float, help="Render only the first N seconds of each video (preview)")
@@ -254,10 +295,10 @@ def main() -> int:
                        "--out-dir", str(audio)]))
     else:
         cmd = [py, str(SCRIPT_DIR / "process_music_wav.py"), str(src), "--genre", args.genre,
-               "--preset", args.preset, "--title", title, "--out-dir", str(audio),
+               "--preset", args.preset, f"--title={title}", "--out-dir", str(audio),
                "--formats", ",".join(formats)]
         if args.artist:
-            cmd += ["--artist", args.artist]
+            cmd += [f"--artist={args.artist}"]  # one token: a leading "-" can't read as a flag
         if args.start is not None:
             cmd += ["--start", f"{args.start}"]
         if args.end is not None:
@@ -279,8 +320,15 @@ def main() -> int:
         if args.clip_start is not None:
             cmd += ["--start", f"{args.clip_start}"]
         steps.append(("clip", "Picking the Short/Reel clip", cmd))
-    vis = [py, str(SCRIPT_DIR / "visualize_wav.py")]
-    look = ["--style", style, "--title", title] + vis_extra + preview
+    if style in FFMPEG_STYLES:
+        # ffmpeg's own visualization filters: fast, not beat-locked (no --grid)
+        vis = [py, str(SCRIPT_DIR / "ffmpeg_visualize.py")]
+        look = ["--style", style, f"--title={title}"] + viz_args(args) + preview
+    else:
+        if any(getattr(args, d) not in (None, False) for d, _f, _k in VIZ_PASSTHROUGH):
+            print(f"note: --viz-* options only apply to ffmpeg styles; ignoring them for {style}")
+        vis = [py, str(SCRIPT_DIR / "visualize_wav.py")]
+        look = ["--style", style, f"--title={title}"] + vis_extra + preview
     videos = {
         "video_16x9": (out / f"{slug}_youtube_16x9.mp4", "landscape", master, analysis, "Rendering the YouTube video (16:9)"),
         "video_9x16": (out / f"{slug}_short_9x16.mp4", "shorts", clip, clip_grid, "Rendering the Short / Reel video (9:16)"),
@@ -288,7 +336,8 @@ def main() -> int:
     }
     for key, (dst, fmt, audio_in, grid, label) in videos.items():
         if key in outputs:
-            steps.append((key, label, vis + [str(audio_in), str(dst), "--format", fmt, "--grid", str(grid)] + look))
+            grid_arg = [] if style in FFMPEG_STYLES else ["--grid", str(grid)]
+            steps.append((key, label, vis + [str(audio_in), str(dst), "--format", fmt] + grid_arg + look))
     if "captions" in outputs:
         steps.append(("captions", "Writing captions", None))
     if "analysis" in outputs:

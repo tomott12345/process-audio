@@ -18,6 +18,43 @@ them deletes your source file or guesses a recipe for content it doesn't
 recognize. The tunable parts (EQ chains, loudness targets, detection
 thresholds) live in `recipes.json` and `music_recipes.json`, not in code.
 
+## Run it with Docker (easiest)
+
+The whole thing -- web app, Python pipelines, ffmpeg, fonts -- comes as
+one image, so the only thing you need installed is Docker
+([Docker Desktop](https://www.docker.com/products/docker-desktop/) on a
+Mac or Windows).
+
+```bash
+docker run -d --name process-audio \
+  -p 127.0.0.1:8765:8765 \
+  -v process-audio-data:/data \
+  ghcr.io/tomott12345/process-audio:latest
+```
+
+Then open http://127.0.0.1:8765. Uploads and finished jobs live in the
+`process-audio-data` volume, so they survive restarts and upgrades.
+
+- **Upgrade:** `docker pull ghcr.io/tomott12345/process-audio:latest`,
+  then `docker rm -f process-audio` and rerun the command above. Your jobs
+  stay in the volume.
+- **Stop:** `docker stop process-audio`.
+- **Compose:** `docker compose up -d` with the repo's `compose.yaml` does
+  the same thing (`--build` builds from your checkout instead of pulling).
+- **Build it yourself:** `docker build -t process-audio .`
+- **Voice/footstep removal (Demucs):** it's left out of the image because
+  torch adds several GB. Add it with
+  `docker build --build-arg WITH_DEMUCS=1 -t process-audio:demucs .`
+- **Check an image:**
+  `docker run --rm --entrypoint python3 -w /app ghcr.io/tomott12345/process-audio -m pytest -q`
+  runs the full test suite inside it.
+
+Keep the port on `127.0.0.1` as shown. The app has no login yet, and
+anyone who can reach the port can upload files and run jobs. Images are
+built for both Intel/AMD (amd64) and Apple Silicon/ARM (arm64). Inside
+Docker, videos encode with x264 rather than the Mac's hardware encoder,
+so ffmpeg-style renders are somewhat slower than running natively.
+
 ## Web app
 
 `web/` is a Go server with a browser front end for all three pipelines.
@@ -523,6 +560,49 @@ warns and skips the emoji rather than failing if none is found.
 
 Run `python3 visualize_wav.py --help` for the full flag list and defaults.
 
+## ffmpeg visualizations
+
+`ffmpeg_visualize.py` makes visualizer videos with ffmpeg's own
+audio-visualization filters. Python only builds the command; ffmpeg draws
+every frame, and on a Mac it encodes with the hardware H.264 encoder.
+It's several times faster than real time, against roughly a quarter of
+real time for the Python-drawn styles in `visualize_wav.py`. These styles
+follow the sound itself rather than the analyzed beat grid.
+
+![All seven ffmpeg styles](docs/images/ffmpeg-styles.png)
+
+| Style | Filter | What it shows | Its own options |
+|---|---|---|---|
+| `cqt` | showcqt | Musical (constant-Q) bars over a scrolling sonogram | note-name axis, sonogram on/off |
+| `spectrum` | showspectrum | Scrolling spectrogram | 15 colour maps, movement (scroll / sweep / page), speed, intensity scale, orientation |
+| `waves` | showwaves | Oscilloscope waveform | filled / lines / peaks / points, one lane per channel |
+| `vectorscope` | avectorscope | Stereo field (lissajous or polar goniometer) | mode, line or dot drawing, zoom |
+| `freqs` | showfreqs | Live frequency response | bars / line / dots, frequency scale |
+| `histogram` | ahistogram | Level histogram over time | scroll or sweep, combined or separate channels |
+| `spatial` | showspatial | Where each frequency sits in the stereo field | analysis window |
+
+Shared options:
+- `--palette` (gold-violet, neon, fire, ice, mono) colours the waveform
+  and vectorscope directly. For CQT, frequency bars, and histogram, it maps
+  brightness onto a black → colour → colour → white ramp. Those filters
+  add the left and right channel colours together, so their own colours
+  turn white on centred (mono) content.
+- `--glow` adds a soft bloom, and `--trails` adds motion trails.
+- `--title` adds a text overlay. This ffmpeg build has no `drawtext`, so
+  the title is drawn as a PNG and overlaid.
+- `--max-seconds` renders a preview.
+
+```bash
+python3 ffmpeg_visualize.py track.wav out.mp4 --style cqt --format landscape
+python3 ffmpeg_visualize.py clip.wav short.mp4 --style spectrum --spectrum-color magma --glow --format shorts
+```
+
+In `release.py` and the web app, pick one as the visual style
+(`--style spectrum`, or **Advanced → Video → Visual style**). Each style's
+own options appear in the web app only when that style is chosen; on the
+command line they're the `--viz-*` flags (`--viz-glow`,
+`--viz-spectrum-color`, ...).
+
 ## Layout
 
 - `process_field_wav.py` / `process_field_wav.sh` -- the main nature-ambience
@@ -536,6 +616,7 @@ Run `python3 visualize_wav.py --help` for the full flag list and defaults.
 - `remove_foreground.py` -- Demucs-based voice/foreground removal (optional,
   heavy; needs `torch` + `demucs`)
 - `batch_process.py` -- run the pipeline over a folder or CSV manifest
+- `ffmpeg_visualize.py` -- fast visualizer videos from ffmpeg's built-in audio-visualization filters (7 styles)
 - `visualize_wav.py` -- audio-reactive visualization video (radial, bar,
   glowburst, or wormhole), muxed with the source WAV into an mp4 (optional; needs
   `librosa` + `pillow`)
@@ -553,6 +634,8 @@ Run `python3 visualize_wav.py --help` for the full flag list and defaults.
 - `tests/` -- pipeline contract + render tests; synthetic test audio generator
 - `WEB_APP_PLAN.md` -- plan for the Go web front end
 - `web/` -- the Go web app (API server + browser UI) -- see `web/README.md`
+- `Dockerfile`, `compose.yaml`, `docker/requirements.txt`, `.dockerignore` -- the Docker image
+- `.github/workflows/docker.yml` -- CI: tests the image on every PR, publishes it to ghcr.io from `master` and version tags
 - `docs/images/` -- screenshots used in this README
 - `music_recipes.json` -- music: per-genre recipes and loudness presets
 - `recipes.json` -- per-label EQ chains, loudness targets, loop policy,

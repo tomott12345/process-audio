@@ -141,7 +141,8 @@ function optVisible(o) {
   if (o.requires_output && !o.requires_output.some((x) => state.outputs.has(x))) return false;
   for (const [dep, want] of Object.entries(o.requires_option || {})) {
     const d = p.options.find((x) => x.id === dep);
-    if (d && optValue(d) !== want) return false;
+    const have = d ? optValue(d) : undefined;
+    if (Array.isArray(want) ? !want.includes(have) : have !== want) return false;
   }
   return true;
 }

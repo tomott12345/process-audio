@@ -118,6 +118,33 @@ func cases(c *Capabilities) []tcase {
 				all[p.Options[i].ID] = sampleValue(&p.Options[i], typeID)
 			}
 			out = append(out, tcase{Req: Request{p.ID, typeID, all, defOut, []string{"wav24", "wav16", "flac", "mp3"}}})
+			// everything at once under each value of every option that others
+			// depend on (e.g. each visual style: the ffmpeg knobs follow it)
+			deps := map[string]bool{}
+			for _, o := range p.Options {
+				for d := range o.RequiresOption {
+					deps[d] = true
+				}
+			}
+			for i := range p.Options {
+				o := &p.Options[i]
+				if !deps[o.ID] || o.Kind != "choice" {
+					continue
+				}
+				for _, c := range o.Choices {
+					vals := map[string]any{}
+					for k, v := range all {
+						vals[k] = v
+					}
+					vals[o.ID] = c.Value
+					vals["viz_glow"], vals["viz_trails"] = true, true
+					if _, ok := p.Option("viz_glow"); !ok {
+						delete(vals, "viz_glow")
+						delete(vals, "viz_trails")
+					}
+					out = append(out, tcase{Req: Request{p.ID, typeID, vals, allOut, []string{"wav24"}}})
+				}
+			}
 			// one output at a time
 			for _, o := range allOut {
 				out = append(out, tcase{Req: Request{p.ID, typeID, nil, []string{o}, []string{"flac"}}})
