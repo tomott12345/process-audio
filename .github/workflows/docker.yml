@@ -30,6 +30,27 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: web/go.mod
+      # the argv parity test runs the Python reference builder against
+      # the real capabilities: install what the pipelines need, or music
+      # reports itself unavailable and most of the option surface goes
+      # untested
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: docker/requirements.txt
+      - name: Python dependencies + ffmpeg
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg
+          pip install -r docker/requirements.txt
+      - name: Every pipeline must be available
+        run: |
+          python3 pipeline_capabilities.py --compact | python3 -c "
+          import json, sys
+          caps = json.load(sys.stdin)
+          off = [(p['id'], p.get('disabled_reason')) for p in caps['pipelines'] if not p['available']]
+          assert not off, off
+          print('all pipelines available')"
       - name: go vet + unit tests
         working-directory: web
         run: |

@@ -172,6 +172,15 @@ def test_build_argv_rejects_bad_input(caps):
         pc.build_argv(caps, "speech", None, {}, [], ["wav24"], "i", "o")
 
 
+def test_unavailable_pipeline_is_rejected(caps):
+    # e.g. music without librosa installed: the Go server refuses it, and so
+    # must the reference builder
+    music = dict(pipe(caps, "music"), available=False, disabled_reason="needs librosa")
+    off = dict(caps, pipelines=[music if p["id"] == "music" else p for p in caps["pipelines"]])
+    with pytest.raises(ValueError, match="unavailable"):
+        pc.build_argv(off, "music", "techno", {}, ["master"], ["wav24"], "i", "o")
+
+
 def test_inactive_options_are_not_sent(caps):
     # dynamic EQ exists only for techno; emoji only matters on radial style
     argv = pc.build_argv(caps, "music", "ambient", {"dynamic_eq": False, "emoji": "⭐"},

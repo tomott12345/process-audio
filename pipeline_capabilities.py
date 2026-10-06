@@ -524,6 +524,8 @@ def build_argv(caps: dict, pipeline_id: str, type_id: str | None, values: dict, 
     pipe = next((p for p in caps["pipelines"] if p["id"] == pipeline_id), None)
     if pipe is None:
         raise ValueError(f"unknown pipeline {pipeline_id!r}")
+    if not pipe.get("available", True):
+        raise ValueError(f"the {pipe['label']} pipeline is unavailable: {pipe.get('disabled_reason')}")
     argv = [caps["python"], str(Path(caps["repo"]) / pipe["script"]), input_path]
     if pipe["type"]:
         if type_id not in {t["id"] for t in pipe["types"]}:
