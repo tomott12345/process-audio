@@ -18,6 +18,43 @@ them deletes your source file or guesses a recipe for content it doesn't
 recognize. The tunable parts (EQ chains, loudness targets, detection
 thresholds) live in `recipes.json` and `music_recipes.json`, not in code.
 
+## Run it with Docker (easiest)
+
+The whole thing -- web app, Python pipelines, ffmpeg, fonts -- comes as
+one image, so the only thing you need installed is Docker
+([Docker Desktop](https://www.docker.com/products/docker-desktop/) on a
+Mac or Windows).
+
+```bash
+docker run -d --name process-audio \
+  -p 127.0.0.1:8765:8765 \
+  -v process-audio-data:/data \
+  ghcr.io/tomott12345/process-audio:latest
+```
+
+Then open http://127.0.0.1:8765. Uploads and finished jobs live in the
+`process-audio-data` volume, so they survive restarts and upgrades.
+
+- **Upgrade:** `docker pull ghcr.io/tomott12345/process-audio:latest`,
+  then `docker rm -f process-audio` and rerun the command above. Your jobs
+  stay in the volume.
+- **Stop:** `docker stop process-audio`.
+- **Compose:** `docker compose up -d` with the repo's `compose.yaml` does
+  the same thing (`--build` builds from your checkout instead of pulling).
+- **Build it yourself:** `docker build -t process-audio .`
+- **Voice/footstep removal (Demucs):** it's left out of the image because
+  torch adds several GB. Add it with
+  `docker build --build-arg WITH_DEMUCS=1 -t process-audio:demucs .`
+- **Check an image:**
+  `docker run --rm --entrypoint python3 -w /app ghcr.io/tomott12345/process-audio -m pytest -q`
+  runs the full test suite inside it.
+
+Keep the port on `127.0.0.1` as shown. The app has no login yet, and
+anyone who can reach the port can upload files and run jobs. Images are
+built for both Intel/AMD (amd64) and Apple Silicon/ARM (arm64). Inside
+Docker, videos encode with x264 rather than the Mac's hardware encoder,
+so ffmpeg-style renders are somewhat slower than running natively.
+
 ## Web app
 
 `web/` is a Go server with a browser front end for all three pipelines.
@@ -597,6 +634,8 @@ command line they're the `--viz-*` flags (`--viz-glow`,
 - `tests/` -- pipeline contract + render tests; synthetic test audio generator
 - `WEB_APP_PLAN.md` -- plan for the Go web front end
 - `web/` -- the Go web app (API server + browser UI) -- see `web/README.md`
+- `Dockerfile`, `compose.yaml`, `docker/requirements.txt`, `.dockerignore` -- the Docker image
+- `.github/workflows/docker.yml` -- CI: tests the image on every PR, publishes it to ghcr.io from `master` and version tags
 - `docs/images/` -- screenshots used in this README
 - `music_recipes.json` -- music: per-genre recipes and loudness presets
 - `recipes.json` -- per-label EQ chains, loudness targets, loop policy,

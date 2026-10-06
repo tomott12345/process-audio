@@ -1,0 +1,23 @@
+# Only the pipelines (top-level *.py / *.json), tests/, docker/, and web/
+# go into the build context; everything else in this repo -- recordings,
+# renders, runtime data, local builds -- stays out.
+.git
+.github
+.claude
+.DS_Store
+**/__pycache__
+**/*.pyc
+.pytest_cache
+web/data
+web/bin
+docs
+*_fieldaudio
+*_music
+*_release
+*.wav
+*.wave
+*.mp3
+*.mp4
+*.mov
+*.aiff
+*.flac

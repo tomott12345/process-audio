@@ -1,0 +1,100 @@
+# Build, test, and publish the Docker image.
+#
+#   pull requests     build + test only
+#   push to master    test, then publish ghcr.io/<owner>/process-audio:latest (+ :master, :sha-...)
+#   tag vX.Y.Z        test, then publish :X.Y.Z and :X.Y (and :latest)
+#
+# Users then run:  docker run -p 127.0.0.1:8765:8765 -v process-audio-data:/data ghcr.io/<owner>/process-audio
+name: Docker image
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: web/go.mod
+      - name: go vet + unit tests
+        working-directory: web
+        run: |
+          go vet ./...
+          go test -short ./...
+
+  image:
+    name: Build and test the image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build (linux/amd64, loaded for testing)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: process-audio:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Full test suite inside the image (renders included)
+        run: docker run --rm --entrypoint python3 -w /app process-audio:ci -m pytest -q -p no:cacheprovider
+      - name: Smoke-test the web server
+        run: |
+          docker run -d --name pa -p 127.0.0.1:8765:8765 process-audio:ci
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8765/api/health && break; sleep 1; done
+          curl -sf http://127.0.0.1:8765/api/capabilities \
+            | python3 -c "import json,sys; p=json.load(sys.stdin)['pipelines']; assert [x['id'] for x in p]==['music','nature','speech'], p; print('pipelines ok')"
+          curl -sf http://127.0.0.1:8765/ | grep -q "Process Audio"
+          docker logs pa
+
+  publish:
+    name: Publish to GitHub Container Registry
+    needs: [go, image]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/process-audio
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+      - name: Build and push (linux/amd64 + linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

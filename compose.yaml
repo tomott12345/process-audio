@@ -1,0 +1,20 @@
+# docker compose up -d   ->  http://127.0.0.1:8765
+#
+# Pulls the published image from GitHub's container registry. To build it
+# from this checkout instead: docker compose up -d --build
+services:
+  process-audio:
+    image: ghcr.io/tomott12345/process-audio:latest
+    build: .
+    ports:
+      # loopback only: the app has no login yet
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - process-audio-data:/data
+    restart: unless-stopped
+    # uncomment to change how many jobs run at once (video renders use
+    # every core; 1 is usually right)
+    # command: ["-addr", "0.0.0.0:8765", "-workers", "1"]
+
+volumes:
+  process-audio-data:

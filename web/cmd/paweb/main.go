@@ -36,9 +36,18 @@ func main() {
 	data := flag.String("data", "", "folder for uploads and jobs (default: <repo>/web/data)")
 	workers := flag.Int("workers", 1, "jobs to run at once (video renders use every core; 1 is usually right)")
 	maxMB := flag.Int64("max-upload-mb", 2048, "largest accepted upload, in MB")
+	container := flag.Bool("container", false, "running inside a container: allow listening on all interfaces "+
+		"(publish the port on 127.0.0.1 only -- there is no login yet)")
 	flag.Parse()
 
-	if err := checkLoopback(*addr); err != nil {
+	if *container {
+		// Inside a container the server must listen on the container's own
+		// interface for port publishing to work at all; who can reach it is
+		// decided by how the port is published on the host.
+		log.Print("container mode: listening on all container interfaces. Publish the port on the host's " +
+			"loopback only (docker run -p 127.0.0.1:8765:8765) -- this app has no login yet, and anyone who " +
+			"can reach the port can upload files and run jobs.")
+	} else if err := checkLoopback(*addr); err != nil {
 		log.Fatal(err)
 	}
 	root := *repo
