@@ -123,8 +123,8 @@ def test_every_option_flag_is_accepted(caps, tracks, tmp_path, pid, oid):
     values = {oid: sample_value(o, type_id)}
     for dep, want in (o.get("requires_option") or {}).items():
         values[dep] = want[0] if isinstance(want, list) else want
-    if o.get("requires_option", {}).get("style") == "radial":
-        type_id = "trap"
+    if pid == "music" and o.get("requires_option", {}).get("style") == "radial":
+        type_id = "trap"  # trap's default style is radial
     outputs = list(o.get("requires_output") or [x["id"] for x in p["outputs"] if x["default"] and x.get("available", True)])
     o_avail = dict(o, available=True)  # parse-check flags even if the dependency is missing
     p_check = dict(p, options=[o_avail if x["id"] == oid else x for x in p["options"]])
@@ -305,6 +305,46 @@ def test_ffmpeg_styles_render(tracks, tmp_path, style):
     assert (v["width"], v["height"]) == (1080, 1920)
     assert any(st["codec_type"] == "audio" for st in info["streams"])
     assert abs(float(info["format"]["duration"]) - 3.0) < 0.2
+
+
+def video_size(path):
+    info = json.loads(subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                      "stream=width,height:format=duration", "-of", "json", str(path)],
+                                     capture_output=True, text=True).stdout)
+    v = info["streams"][0]
+    return v["width"], v["height"], float(info["format"]["duration"])
+
+
+@pytest.mark.slow
+def test_speech_video_only(caps, tracks, tmp_path):
+    values = {"title": "-Ep 1-", "style": "waves", "viz_waves_mode": "line", "eq": False, "highpass_hz": 120,
+              "fade": 1.0, "max_seconds": 4}
+    argv = pc.build_argv(caps, "speech", None, values, ["video_9x16"], ["wav24"], str(tracks["speech"]), str(tmp_path))
+    assert "--skip-master" in argv and "--video-9x16" in argv
+    files, ev = check_run(argv)
+    assert [f["kind"] for f in files] == ["video_9x16", "report"], files
+    w, h, d = video_size(files[0]["path"])
+    assert (w, h) == (1080, 1920) and abs(d - 4) < 0.3
+    report = (tmp_path / "REPORT.txt").read_text()
+    assert "highpass=f=120" in report and "equalizer=f=3000" not in report  # --highpass-hz / --no-eq reached the chain
+    frames = [e for e in ev if e.get("detail") == "frames" and e.get("parent") == "video_9x16"]
+    assert frames and frames[-1]["done"] == frames[-1]["total"]
+
+
+@pytest.mark.slow
+def test_nature_videos_from_both_masters(caps, tracks, tmp_path):
+    # deliver only the long master, but ask for a 1:1 video -- which comes from
+    # the Short master, so the Short is made without being delivered
+    values = {"style": "spectrum", "viz_spectrum_color": "viridis", "max_seconds": 3, "eq": False, "short_fade": 1.0}
+    argv = pc.build_argv(caps, "nature", "rain", values, ["master_long", "video_16x9", "video_1x1"], ["wav24"],
+                         str(tracks["rain"]), str(tmp_path))
+    assert "--skip-short" in argv
+    files, _ = check_run(argv)
+    kinds = [f["kind"] for f in files]
+    assert kinds == ["master_long", "video_16x9", "video_1x1", "report"], kinds
+    assert video_size(files[1]["path"])[:2] == (1920, 1080)
+    assert video_size(files[2]["path"])[:2] == (1080, 1080)
+    assert (tmp_path / "master_short.wav").exists()  # made for the video, not delivered
 
 
 @pytest.mark.slow

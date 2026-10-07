@@ -126,6 +126,7 @@ type Output struct {
 	Label              string `json:"label"`
 	Formats            bool   `json:"formats,omitempty"`
 	Default            bool   `json:"default"`
+	FlagWhenOn         string `json:"flag_when_on,omitempty"`
 	FlagWhenOff        string `json:"flag_when_off,omitempty"`
 	RequiresDependency string `json:"requires_dependency,omitempty"`
 	Slow               bool   `json:"slow,omitempty"`
