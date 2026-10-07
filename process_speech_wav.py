@@ -46,6 +46,10 @@ from pipeline_io import (
     AUDIO_FORMATS, emit, emit_manifest, emit_plan, enable_progress, export_formats,
     json_mode, parse_formats, print_json,
 )
+from video_render import (
+    VIDEO_FORMATS, add_video_args, python_style_extra, requested_videos, run_video, slugify,
+    video_command,
+)
 
 REQUIRED_FILTERS = (
     "highpass", "equalizer", "deesser", "acompressor",
@@ -176,13 +180,15 @@ def copy_trim(src: Path, dst: Path, start: float, end: float) -> None:
     _ffmpeg_to(cmd, tmp, dst)
 
 
-def tone_chain(*, compress: bool, deess: bool) -> str:
-    parts = [
-        "highpass=f=90:poles=2",
-        "equalizer=f=300:t=q:w=1.0:g=-2.0",
-        "equalizer=f=3000:t=q:w=1.0:g=2.0",
-        "equalizer=f=9000:t=q:w=1.2:g=1.0",
-    ]
+def tone_chain(*, compress: bool, deess: bool, highpass_hz: float = 90.0, eq: bool = True) -> str:
+    parts = [f"highpass=f={highpass_hz:g}:poles=2"]
+    if eq:
+        # gentle presence EQ: less boxiness, more intelligibility, a little air
+        parts += [
+            "equalizer=f=300:t=q:w=1.0:g=-2.0",
+            "equalizer=f=3000:t=q:w=1.0:g=2.0",
+            "equalizer=f=9000:t=q:w=1.2:g=1.0",
+        ]
     if deess:
         parts.append("deesser=i=0.15:m=0.4:f=0.5:s=o")
     if compress:
@@ -212,6 +218,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--artist", help="Artist / show tag for the deliverables")
     p.add_argument("--json", action="store_true", help="With --plan-only: print the plan as one JSON document")
     p.add_argument("--progress-json", action="store_true", help="Emit machine-readable progress lines (see pipeline_io.py)")
+    p.add_argument("--highpass-hz", type=float, default=90.0, help="Rumble/plosive high-pass in Hz (40-200, default 90)")
+    p.add_argument("--no-eq", action="store_true", help="Skip the presence EQ")
+    p.add_argument("--fade", type=float, help="Fade in/out seconds (0-5; default 0.5, shorter for very short files)")
+    p.add_argument("--skip-master", action="store_true",
+                   help="Don't deliver the audio master (it's still made -- videos are rendered from it)")
+    add_video_args(p, default_style="waves")
     return p
 
 
@@ -238,21 +250,32 @@ def main() -> int:
     if args.target_lra is not None:
         lra = args.target_lra
 
-    chain = tone_chain(compress=not args.no_compress, deess=not args.no_deess)
+    if not 40 <= args.highpass_hz <= 200:
+        die(f"--highpass-hz {args.highpass_hz:g} is out of range (40..200)", 2)
+    if args.fade is not None and not 0 <= args.fade <= 5:
+        die(f"--fade {args.fade:g} is out of range (0..5)", 2)
+    videos = requested_videos(args)
+    if args.skip_master and not videos:
+        die("--skip-master leaves nothing to deliver -- ask for a video too", 2)
+    chain = tone_chain(compress=not args.no_compress, deess=not args.no_deess,
+                       highpass_hz=args.highpass_hz, eq=not args.no_eq)
 
     plan_steps = []
     if args.start is not None or args.end is not None:
         plan_steps.append(("trim", "Trimming"))
     if args.trim_silence:
         plan_steps.append(("silence", "Trimming leading/trailing silence"))
-    plan_steps += [("process", "Cleanup EQ / de-ess / compression"), ("loudness", "Loudness + limiter"),
-                   ("deliverables", "Writing audio formats")]
+    plan_steps += [("process", "Cleanup EQ / de-ess / compression"), ("loudness", "Loudness + limiter")]
+    if not args.skip_master:
+        plan_steps.append(("deliverables", "Writing audio formats"))
+    plan_steps += [(v, f"Rendering the {VIDEO_FORMATS[v][2]}") for v in videos]
     if args.plan_only and args.json:
         print_json({
             "pipeline": "speech", "script": "process_speech_wav.py", "preset": args.preset,
             "targets": {"i": i, "tp": tp, "lra": lra}, "chain": chain, "mono": args.mono,
             "trim_silence": args.trim_silence, "silence_threshold": args.silence_threshold,
-            "trim": {"start": args.start, "end": args.end}, "formats": list(args.formats),
+            "trim": {"start": args.start, "end": args.end}, "formats": [] if args.skip_master else list(args.formats),
+            "videos": videos, "style": args.style if videos else None,
             "steps": [{"step": n, "label": lbl} for n, lbl in plan_steps],
         })
         return 0
@@ -337,7 +360,7 @@ def main() -> int:
     emit("step_start", step="loudness", label="Loudness + limiter")
     meas = loudnorm_measure(processed, i, tp, lra)
     proc_dur = duration_seconds(processed)
-    fade = 0.5 if proc_dur > 4.0 else max(0.05, proc_dur / 8)
+    fade = args.fade if args.fade is not None else (0.5 if proc_dur > 4.0 else max(0.05, proc_dur / 8))
     fade_out_at = max(0.0, proc_dur - fade)
     ln = (
         f"loudnorm=I={i}:TP={tp}:LRA={lra}"
@@ -354,24 +377,37 @@ def main() -> int:
     master = out_dir / "master.wav"
     ffmpeg_wav(af, processed, master)
     emit("step_end", step="loudness")
-    emit("step_start", step="deliverables", label="Writing audio formats")
     meta = {"title": args.title or "", "artist": args.artist or "", "genre": "Speech",
             "comment": f"preset={args.preset}"}
-    products = export_formats(master, "master", args.formats, meta)
-    emit("step_end", step="deliverables")
+    products = {}
+    if not args.skip_master:
+        emit("step_start", step="deliverables", label="Writing audio formats")
+        products = export_formats(master, "master", args.formats, meta)
+        emit("step_end", step="deliverables")
+    title = args.title or src.stem
+    video_files = {}
+    for v in videos:
+        dst = out_dir / f"{slugify(title)}_{VIDEO_FORMATS[v][1]}.mp4"
+        run_video(v, f"Rendering the {VIDEO_FORMATS[v][2]}",
+                  video_command(args, args.style, master, dst, v, title, python_extra=python_style_extra(args)))
+        video_files[v] = dst
     vd = volumedetect(master)
     report.append(
         f"measured_I={meas.get('input_i')} input_lra={meas.get('input_lra')} "
         f"final_max_volume={vd['max_volume']} final_dur={proc_dur:.3f}"
     )
-    report += [f"product={pth}" for pth in products.values()]
+    if videos:
+        report.append(f"videos={','.join(videos)} style={args.style}"
+                      + (f" preview={args.max_seconds:g}s" if args.max_seconds else ""))
+    report += [f"product={pth}" for pth in [*products.values(), *video_files.values()]]
     write_report(out_dir / "REPORT.txt", report)
     emit_manifest([{"kind": "master", "format": f, "path": pth} for f, pth in products.items()]
+                  + [{"kind": v, "format": "mp4", "path": pth} for v, pth in video_files.items()]
                   + [{"kind": "report", "format": "txt", "path": out_dir / "REPORT.txt"}])
 
     print("\n=== REPORT ===")
     print("\n".join(report))
-    for pth in products.values():
+    for pth in [*products.values(), *video_files.values()]:
         print(f"Wrote {pth}")
     print(f"Wrote {out_dir / 'REPORT.txt'}")
     return 0

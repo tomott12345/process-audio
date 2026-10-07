@@ -136,6 +136,9 @@ func (c *Capabilities) BuildArgv(r Request, inputPath, outDir string, plan, prog
 		argv = append(argv, *p.OutputsParam+"="+strings.Join(r.Outputs, ","))
 	}
 	for _, o := range p.Outputs {
+		if o.FlagWhenOn != "" && seen[o.ID] {
+			argv = append(argv, o.FlagWhenOn)
+		}
 		if o.FlagWhenOff != "" && !seen[o.ID] {
 			argv = append(argv, o.FlagWhenOff)
 		}

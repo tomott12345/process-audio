@@ -23,6 +23,7 @@ below, nothing is implied):
         text with flag_empty, set to ""  -> flag_empty
         time_list -> "flag=v" repeated per value
   + outputs: outputs_param  -> "outputs_param=a,b,c"
+             per-output flag_when_on -> that flag for each output chosen
              per-output flag_when_off -> that flag for each output NOT chosen
   + formats: "formats_param=wav24,mp3"  when any chosen output has formats
   + "--out-dir=<job dir>", and run.progress_flag
@@ -116,6 +117,40 @@ STYLE_LABELS = (
 FFMPEG_STYLES = ["cqt", "spectrum", "waves", "vectorscope", "freqs", "histogram", "spatial"]
 SPECTRUM_COLORS = ("plasma", "magma", "viridis", "cividis", "rainbow", "intensity", "fire", "fiery",
                    "nebulae", "moreland", "fruit", "cool", "green", "terrain", "channel")
+
+
+VIDEO_IDS = ["video_16x9", "video_9x16", "video_1x1"]
+
+
+def video_outputs(sources: dict[str, str]) -> list[dict]:
+    """The three visualizer video outputs for a non-music pipeline; each
+    is requested with its own flag (--video-16x9, ...)."""
+    names = {"video_16x9": "YouTube video (16:9)", "video_9x16": "Short / Reel video (9:16)",
+             "video_1x1": "Instagram feed video (1:1)"}
+    return [{"id": v, "label": f"{names[v]}{sources.get(v, '')}", "default": False,
+             "flag_when_on": "--" + v.replace("_", "-"), **({"slow": True} if v == "video_16x9" else {})}
+            for v in VIDEO_IDS]
+
+
+def video_options(default_style: str, slow_note: str) -> list[dict]:
+    """Style + look options for a non-music pipeline's videos. There's no
+    beat grid outside music, so the Python-drawn styles follow the sound
+    (onsets), and they're labelled by what matters here: speed."""
+    labels = [(v, label.replace("-- beat-locked", "-- Python-drawn, slow")) for v, label in STYLE_LABELS]
+    return [
+        opt("style", "video", "Visual style", "choice", flag="--style", advanced=True, default=default_style,
+            choices=[{"value": v, "label": label} for v, label in labels], requires_output=VIDEO_IDS,
+            help="ffmpeg styles render several times faster than real time; Python-drawn ones run at about "
+                 "a quarter of real time" + slow_note),
+        opt("emoji", "video", "Center emoji", "text", flag="--emoji", advanced=True, default="",
+            requires_output=VIDEO_IDS, requires_option={"style": "radial"}),
+        opt("symmetry", "video", "Symmetry", "number", flag="--symmetry", advanced=True, default=1,
+            min=1, max=12, step=1, requires_output=VIDEO_IDS, requires_option={"style": "radial"}),
+        opt("max_seconds", "video", "Preview length", "number", flag="--max-seconds", advanced=True,
+            min=1, max=600, step=1, unit="s", suggest=20, requires_output=VIDEO_IDS,
+            help="Render only the first N seconds of each video -- a quick look before the full render"),
+        *ffmpeg_viz_options(VIDEO_IDS),
+    ]
 
 
 def ffmpeg_viz_options(videos: list[str]) -> list[dict]:
@@ -391,6 +426,16 @@ def nature_pipeline(deps: dict) -> dict:
             advanced=True, requires_dependency="demucs",
             choices=[{"value": m, "label": m} for m in ("htdemucs", "htdemucs_ft", "mdx_extra")]),
         opt("artist", "basics", "Artist", "text", flag="--artist", default="", advanced=True),
+        opt("eq", "processing", "Label EQ curve", "bool", flag_false="--no-eq", default=True, advanced=True,
+            detail_by_type={n: r["eq"] for n, r in labels.items()},
+            help="The recording type's EQ; off keeps only cleanup and loudness"),
+        opt("long_fade", "processing", "Long master fades", "number", flag="--long-fade", advanced=True,
+            min=0, max=30, step=0.5, unit="s", suggest=4, requires_output=["master_long", "video_16x9"],
+            help="Default: 4 s, or 1 s under two minutes"),
+        opt("short_fade", "processing", "Short master fades", "number", flag="--short-fade", advanced=True,
+            default=0.4, min=0, max=10, step=0.1, unit="s",
+            requires_output=["master_short", "video_9x16", "video_1x1"]),
+        *video_options("spectrum", "; a long master can be an hour, so prefer an ffmpeg style or set a preview length"),
     ]
     return {
         "id": "nature", "label": "Nature",
@@ -400,12 +445,15 @@ def nature_pipeline(deps: dict) -> dict:
         "type": {"param": "--label", "label": "What is it a recording of?", "required": True},
         "types": types,
         "groups": [{"id": "basics", "label": "Basics"}, {"id": "trim", "label": "Trim"},
-                   {"id": "looping", "label": "Looping"}, {"id": "cleanup", "label": "Cleanup"}],
+                   {"id": "looping", "label": "Looping"}, {"id": "cleanup", "label": "Cleanup"},
+                   {"id": "processing", "label": "Processing"}, {"id": "video", "label": "Video"}],
         "options": options,
         "outputs": [
             {"id": "master_long", "label": "Long master", "formats": True, "default": True, "flag_when_off": "--skip-long"},
             {"id": "master_short", "label": "Short master (3 min)", "formats": True, "default": True,
              "flag_when_off": "--skip-short"},
+            *video_outputs({"video_16x9": ", from the long master", "video_9x16": ", from the Short master",
+                            "video_1x1": ", from the Short master"}),
         ],
         "outputs_param": None,
         "formats_param": "--formats", "default_formats": ["wav24"],
@@ -443,6 +491,14 @@ def speech_pipeline(deps: dict) -> dict:
             min=-3, max=-0.1, step=0.1, unit="dBTP", suggest=-1.5),
         opt("target_lra", "loudness", "Loudness range", "number", flag="--target-lra", advanced=True,
             min=3, max=20, step=0.5, unit="LU", suggest=9),
+        opt("highpass_hz", "processing", "Rumble / plosive high-pass", "number", flag="--highpass-hz",
+            default=90.0, min=40, max=200, step=5, unit="Hz", advanced=True,
+            help="Raise it for boomy rooms or handling noise; lower it for deep voices"),
+        opt("eq", "processing", "Presence EQ", "bool", flag_false="--no-eq", default=True, advanced=True,
+            detail="-2 dB at 300 Hz (boxiness), +2 dB at 3 kHz (clarity), +1 dB at 9 kHz (air)"),
+        opt("fade", "processing", "Fade in / out", "number", flag="--fade", advanced=True, default=0.5,
+            min=0, max=5, step=0.1, unit="s"),
+        *video_options("waves", "; full-length episodes take a while"),
     ]
     return {
         "id": "speech", "label": "Speech",
@@ -450,9 +506,12 @@ def speech_pipeline(deps: dict) -> dict:
         "script": "process_speech_wav.py",
         "type": None, "types": [],
         "groups": [{"id": "tags", "label": "Title & tags"}, {"id": "loudness", "label": "Loudness"},
-                   {"id": "trim", "label": "Trim"}, {"id": "processing", "label": "Processing"}],
+                   {"id": "trim", "label": "Trim"}, {"id": "processing", "label": "Processing"},
+                   {"id": "video", "label": "Video"}],
         "options": options,
-        "outputs": [{"id": "master", "label": "Master", "formats": True, "default": True}],
+        "outputs": [{"id": "master", "label": "Master", "formats": True, "default": True,
+                     "flag_when_off": "--skip-master"},
+                    *video_outputs({"video_9x16": " (whole recording -- trim or set a preview length for a Short)"})],
         "outputs_param": None,
         "formats_param": "--formats", "default_formats": ["wav24"],
         "analyze": None,
@@ -585,6 +644,8 @@ def build_argv(caps: dict, pipeline_id: str, type_id: str | None, values: dict, 
     if pipe["outputs_param"]:
         argv.append(f"{pipe['outputs_param']}={','.join(outputs)}")
     for o in pipe["outputs"]:
+        if o.get("flag_when_on") and o["id"] in outputs:
+            argv.append(o["flag_when_on"])
         if o.get("flag_when_off") and o["id"] not in outputs:
             argv.append(o["flag_when_off"])
     if any(out_ids[o].get("formats") for o in outputs):

@@ -603,6 +603,40 @@ own options appear in the web app only when that style is chosen; on the
 command line they're the `--viz-*` flags (`--viz-glow`,
 `--viz-spectrum-color`, ...).
 
+## Videos for nature and speech recordings
+
+The nature and speech pipelines can also make visualizer videos, with the
+same 11 styles and per-style options as music. Pick the video outputs in
+the web app (or pass the flags below); the style and its options are under
+**Advanced → Video**.
+
+| Pipeline | 16:9 YouTube video | 9:16 Short / Reel | 1:1 feed post | Default style |
+|---|---|---|---|---|
+| Nature | from the long master | from the 3-minute Short master | from the Short master | Spectrogram |
+| Speech | the whole recording | the whole recording | the whole recording | Waveform (an "audiogram") |
+
+```bash
+python3 process_field_wav.py take.wav --label rain --video-16x9 --video-9x16 --style spectrum --viz-spectrum-color viridis
+python3 process_speech_wav.py episode.wav --video-9x16 --skip-master --style cqt --viz-glow --max-seconds 60
+```
+
+- **Only the videos you need are made.** A master a video needs is still
+  produced even when you don't want it delivered (`--skip-long`,
+  `--skip-short`, `--skip-master`); it just stays out of the downloads.
+- **There's no beat grid outside music,** so the four Python-drawn styles
+  follow the sound itself. They're slow: about a quarter of real time.
+  A nature long master can be an hour long, so prefer an ffmpeg style or
+  set a preview length (`--max-seconds`).
+- **A speech 9:16 is the whole recording.** Trim it (`--start` / `--end`)
+  or set a preview length for something Short-sized.
+
+These pipelines also gained a few processing settings:
+- **Speech:** the rumble/plosive high-pass frequency (`--highpass-hz`,
+  40–200, default 90), the presence EQ on or off (`--no-eq`), and the fade
+  length (`--fade`).
+- **Nature:** the recording type's EQ curve on or off (`--no-eq`), and the
+  fade length for each master (`--long-fade`, `--short-fade`).
+
 ## Layout
 
 - `process_field_wav.py` / `process_field_wav.sh` -- the main nature-ambience
@@ -616,6 +650,7 @@ command line they're the `--viz-*` flags (`--viz-glow`,
 - `remove_foreground.py` -- Demucs-based voice/foreground removal (optional,
   heavy; needs `torch` + `demucs`)
 - `batch_process.py` -- run the pipeline over a folder or CSV manifest
+- `video_render.py` -- shared video plumbing (styles, `--viz-*` options, rendering) for all three pipelines
 - `ffmpeg_visualize.py` -- fast visualizer videos from ffmpeg's built-in audio-visualization filters (7 styles)
 - `visualize_wav.py` -- audio-reactive visualization video (radial, bar,
   glowburst, or wormhole), muxed with the source WAV into an mp4 (optional; needs

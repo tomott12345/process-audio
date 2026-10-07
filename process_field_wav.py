@@ -45,6 +45,10 @@ from pipeline_io import (  # noqa: E402
     AUDIO_FORMATS, emit, emit_manifest, emit_plan, enable_progress, export_formats,
     json_mode, parse_formats, print_json,
 )
+from video_render import (  # noqa: E402
+    VIDEO_FORMATS, add_video_args, python_style_extra, requested_videos, run_video, slugify,
+    video_command,
+)
 
 
 def die(msg: str, code: int = 1) -> None:
@@ -310,13 +314,16 @@ def pick_bed(label: str, analysis: dict, long_mode: str, recipe: dict) -> tuple[
     die(f"recipe for label {label!r} has unknown bed_selection strategy {strategy!r}")
 
 
-def eq_chain(recipe: dict, *, denoise: bool, repair: bool, pre_pad: bool) -> str:
+def eq_chain(recipe: dict, *, denoise: bool, repair: bool, pre_pad: bool, eq: bool = True) -> str:
     parts = []
     if repair:
         parts.append(RECIPES["repair_chain"])
     if pre_pad:
         parts.append("volume=-6dB")
-    parts.append(recipe["eq"])
+    if eq:
+        parts.append(recipe["eq"])
+    if not parts:
+        parts.append("anull")
     if denoise:
         parts.append(RECIPES["denoise_chain"])
     return ",".join(parts)
@@ -751,6 +758,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--artist", help="Artist tag for the audio deliverables")
     p.add_argument("--json", action="store_true", help="With --plan-only: print the plan as one JSON document")
     p.add_argument("--progress-json", action="store_true", help="Emit machine-readable progress lines (see pipeline_io.py)")
+    p.add_argument("--no-eq", action="store_true", help="Skip the label's EQ curve (keep cleanup + loudness)")
+    p.add_argument("--long-fade", type=float,
+                   help="Fade in/out seconds for the long master (0-30; default 4, or 1 under two minutes)")
+    p.add_argument("--short-fade", type=float, help="Fade in/out seconds for the Short master (0-10; default 0.4)")
+    add_video_args(p, default_style="spectrum")
     return p
 
 
@@ -796,6 +808,19 @@ def main() -> int:
             "A/B it against a few real takes before trusting it unattended."
         )
 
+    for name, val, hi in (("long-fade", args.long_fade, 30), ("short-fade", args.short_fade, 10)):
+        if val is not None and not 0 <= val <= hi:
+            die(f"--{name} {val:g} is out of range (0..{hi})", 2)
+    # Videos come from the masters: 16:9 from the long master, 9:16 and 1:1
+    # from the 3-minute Short. A master a video needs is made even when it
+    # isn't wanted as a deliverable (it just stays out of the manifest).
+    videos = requested_videos(args)
+    deliver_long, deliver_short = not args.skip_long, not args.skip_short
+    if "video_16x9" in videos:
+        args.skip_long = False
+    if "video_9x16" in videos or "video_1x1" in videos:
+        args.skip_short = False
+
     have_cleanup = bool(
         args.remove_voice or args.remove_voice_at
         or args.denoise_profile_start is not None or args.denoise_profile_file is not None
@@ -808,9 +833,11 @@ def main() -> int:
         plan_steps.append(("long", "Long master"))
     if not args.skip_short:
         plan_steps.append(("short", "Short master (180s)"))
-    plan_steps.append(("deliverables", "Writing audio formats"))
+    if deliver_long or deliver_short:
+        plan_steps.append(("deliverables", "Writing audio formats"))
     if args.still_16x9 or args.still_9x16:
         plan_steps.append(("mux", "Still-image videos"))
+    plan_steps += [(v, f"Rendering the {VIDEO_FORMATS[v][2]}") for v in videos]
     if not args.plan_only:
         emit_plan(plan_steps)
     emit("step_start", step="analyze", label="Finding the clean bed")
@@ -967,7 +994,7 @@ def main() -> int:
         gain_db = abs(max_vol) - 1.0
         pre_pad = False
 
-    chain = eq_chain(recipe, denoise=args.denoise, repair=args.repair, pre_pad=pre_pad)
+    chain = eq_chain(recipe, denoise=args.denoise, repair=args.repair, pre_pad=pre_pad, eq=not args.no_eq)
     if gain_db:
         chain = f"volume={gain_db}dB," + chain
     print(f"eq: {chain}")
@@ -992,7 +1019,8 @@ def main() -> int:
                     "denoise_profile": have_profile, "remove_voice": bool(args.remove_voice),
                     "remove_voice_at": args.remove_voice_at or [],
                 },
-                "formats": list(args.formats),
+                "formats": list(args.formats) if (deliver_long or deliver_short) else [],
+                "videos": videos, "style": args.style if videos else None,
                 "steps": [{"step": n, "label": lbl} for n, lbl in plan_steps],
             })
             return 0
@@ -1125,7 +1153,7 @@ def main() -> int:
                     f"long_looped=yes slice={slice_start:.3f}-{slice_end:.3f} target={target:.3f}"
                 )
             long_dur = duration_seconds(long_src)
-        fade = 4.0 if long_dur > 120 else 1.0
+        fade = args.long_fade if args.long_fade is not None else (4.0 if long_dur > 120 else 1.0)
         long_master = finish_master("long", long_src, fade, fade)
         products.append(long_master)
         emit("step_end", step="long")
@@ -1181,24 +1209,27 @@ def main() -> int:
             copy_trim(eq_path, clipped, 0.0, 180.0)
             short_src = clipped
             report.append("short_looped=no used_first_180s_of_eq_bed")
-        short_master = finish_master("short", short_src, 0.4, 0.4)
+        sfade = args.short_fade if args.short_fade is not None else 0.4
+        short_master = finish_master("short", short_src, sfade, sfade)
         products.append(short_master)
         emit("step_end", step="short")
 
-    emit("step_start", step="deliverables", label="Writing audio formats")
+    if deliver_long or deliver_short:
+        emit("step_start", step="deliverables", label="Writing audio formats")
     meta = {
         "title": args.title or "", "artist": args.artist or "",
         "genre": "Nature", "comment": f"label={args.label}; place={args.place}",
     }
     manifest: list[dict] = []
-    for kind, m in (("master_long", long_master), ("master_short", short_master)):
-        if m is None:
+    for kind, m, deliver in (("master_long", long_master, deliver_long), ("master_short", short_master, deliver_short)):
+        if m is None or not deliver:
             continue
         for fmt, pth in export_formats(m, m.stem, args.formats, meta, kind=kind).items():
             manifest.append({"kind": kind, "format": fmt, "path": pth})
             if pth != m:
                 products.append(pth)
-    emit("step_end", step="deliverables")
+    if deliver_long or deliver_short:
+        emit("step_end", step="deliverables")
     if args.still_16x9 or args.still_9x16:
         emit("step_start", step="mux", label="Still-image videos")
 
@@ -1232,7 +1263,19 @@ def main() -> int:
         if (out_dir / name) in products or (kind == "thumbnail" and (out_dir / name).exists() and stills):
             manifest.append({"kind": kind, "format": Path(name).suffix.lstrip("."), "path": out_dir / name})
 
-    if not stills:
+    title = args.title or src.stem
+    for v in videos:
+        source = long_master if v == "video_16x9" else short_master
+        dst = out_dir / f"{slugify(title)}_{VIDEO_FORMATS[v][1]}.mp4"
+        run_video(v, f"Rendering the {VIDEO_FORMATS[v][2]}",
+                  video_command(args, args.style, source, dst, v, title, python_extra=python_style_extra(args)))
+        products.append(dst)
+        manifest.append({"kind": v, "format": "mp4", "path": dst})
+    if videos:
+        report.append(f"videos={','.join(videos)} style={args.style}"
+                      + (f" preview={args.max_seconds:g}s" if args.max_seconds else ""))
+
+    if not stills and not videos:
         report.append(
             "stills=skipped (pass --still-16x9 and --still-9x16 to mux still-frame videos)"
         )
