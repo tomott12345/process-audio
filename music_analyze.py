@@ -50,6 +50,21 @@ CAMELOT_MAJOR = {"C": "8B", "G": "9B", "D": "10B", "A": "11B", "E": "12B", "B": 
 CAMELOT_MINOR = {"A": "8A", "E": "9A", "B": "10A", "F#": "11A", "Db": "12A", "Ab": "1A",
                  "Eb": "2A", "Bb": "3A", "F": "4A", "C": "5A", "G": "6A", "D": "7A"}
 
+# --key: a scale's offset above its parent major scale and whether it has a
+# minor third. Camelot codes describe a pitch set, so a mode gets its parent
+# key's number (F dorian = Eb major's notes = 5) and the A (minor) or B
+# (major) side by the third: F dorian -> 5A, G mixolydian -> 8B. Pentatonics
+# and hirajoshi are subsets of major/minor and file under those. Other
+# scales are accepted but get no Camelot code.
+SCALE_MODES = {
+    "major": (0, False), "ionian": (0, False), "dorian": (2, True), "phrygian": (4, True),
+    "lydian": (5, False), "mixolydian": (7, False), "minor": (9, True), "aeolian": (9, True),
+    "locrian": (11, True), "major pentatonic": (0, False), "minor pentatonic": (9, True),
+    "hirajoshi": (9, True), "harmonic minor": (None, True), "melodic minor": (None, True),
+}
+_ENHARMONIC = {"C#": "Db", "D#": "Eb", "Gb": "F#", "G#": "Ab", "A#": "Bb", "Cb": "B", "B#": "C",
+               "Fb": "E", "E#": "F"}
+
 # a beat grid is trusted when the folded onset histogram's peak is this
 # many times its mean (see _comb_score); per-genre override: grid_score_min
 GRID_SCORE_MIN = 3.0
@@ -289,6 +304,40 @@ def estimate_key(y) -> dict:
         "confidence": round(best[0] - second[0], 3),
         "runner_up": f"{second[1]} {second[2]}",
     }
+
+
+def parse_key(text: str) -> dict:
+    """A known key for --key: "F dorian", "A minor", "C#m", "Eb major_pentatonic".
+    Returns the analysis "key" block (name, camelot, source="given");
+    raises ValueError on anything it can't read."""
+    raw = " ".join(text.replace("_", " ").replace("-", " ").split())
+    if not raw:
+        raise ValueError("empty key")
+    head, _, rest = raw.partition(" ")
+    tonic = head[0].upper() + head[1:].replace("\u266f", "#").replace("\u266d", "b")
+    scale = rest.lower()
+    if len(tonic) > 1 and tonic[1:] in ("m", "min"):  # "C#m" / "Am" shorthand
+        tonic, scale = tonic[0], scale or "minor"
+    elif len(tonic) > 2 and tonic[2:] in ("m", "min"):
+        tonic, scale = tonic[:2], scale or "minor"
+    scale = {"maj": "major", "min": "minor", "m": "minor"}.get(scale, scale or "major")
+    if not (len(tonic) <= 2 and tonic[0] in "ABCDEFG" and tonic[1:] in ("", "#", "b")):
+        raise ValueError(f"can't read the key {text!r} -- expected e.g. 'F dorian', 'A minor', 'C# major'")
+    pc = PITCHES.index(_ENHARMONIC.get(tonic, tonic))
+    camelot = None
+    if scale in SCALE_MODES:
+        offset, minor = SCALE_MODES[scale]
+        if offset is not None:
+            parent = PITCHES[(pc - offset) % 12]
+            camelot = CAMELOT_MINOR[PITCHES[(pc - offset + 9) % 12]] if minor else CAMELOT_MAJOR[parent]
+        elif minor:
+            camelot = CAMELOT_MINOR[PITCHES[pc]]  # harmonic/melodic minor: file under the plain minor
+    return {"name": f"{tonic} {scale}", "camelot": camelot, "confidence": None, "source": "given"}
+
+
+def key_label(k: dict) -> str:
+    """'F dorian (5A)', or just the name when there's no Camelot code."""
+    return f"{k['name']} ({k['camelot']})" if k.get("camelot") else k["name"]
 
 
 def stereo_and_spectrum(y_st, recipe: dict, flags: list[str]) -> tuple[dict, dict, dict]:
@@ -551,7 +600,10 @@ def detect_sections(y, tempo: dict, grid: dict, recipe: dict) -> tuple[list[dict
     return merged, drops, main_drop
 
 
-def analyze(path: Path, genre: str, recipe: dict) -> dict:
+def analyze(path: Path, genre: str, recipe: dict, key: str | None = None) -> dict:
+    """key: the song's known key (see parse_key) -- reported instead of the
+    estimate, which is kept under key["detected"]."""
+    given = parse_key(key) if key else None
     require_python({"numpy": "numpy", "scipy": "scipy", "librosa": "librosa"})
     import librosa
     import numpy as np
@@ -566,7 +618,9 @@ def analyze(path: Path, genre: str, recipe: dict) -> dict:
     if not recipe["expect_grid"] and tempo["has_grid"]:
         flags.append(f"found a steady {tempo['bpm']} BPM grid in a genre that usually has none -- using it")
     key = estimate_key(y)
-    if key["confidence"] is not None and key["confidence"] < 0.05:
+    if given:
+        key = dict(given, detected=key)
+    elif key["confidence"] is not None and key["confidence"] < 0.05:
         flags.append(f"key is ambiguous ({key['name']} vs {key.get('runner_up')}) -- treat the key tag as a guess")
 
     loud = ebur128(path)
@@ -617,7 +671,11 @@ def summary_lines(a: dict) -> list[str]:
         lines.append(f"grid:      bar = {a['grid']['bar_seconds']:.3f}s, first downbeat {a['grid']['first_downbeat']}s")
     else:
         lines.append(f"tempo:     no grid (times in seconds; grid score {t['grid_score']})")
-    lines.append(f"key:       {k['name']} ({k['camelot']})  confidence {k['confidence']}")
+    if k.get("source") == "given":
+        d = k.get("detected") or {}
+        lines.append(f"key:       {key_label(k)}  (given; detected {d.get('name')} ({d.get('camelot')}))")
+    else:
+        lines.append(f"key:       {k['name']} ({k['camelot']})  confidence {k['confidence']}")
     lines.append(f"loudness:  {l['integrated_lufs']} LUFS  LRA {l['lra_lu']} LU  true peak {l['true_peak_dbtp']} dBTP  PLR {l['plr_db']} dB")
     lines.append(f"stereo:    corr {s['correlation']}  <{s['low_band_hz']} Hz corr {s['low_band_correlation']}  mono-sum loss {s['mono_sum_loss_db']} dB")
     lines.append(f"phone:     loses {p['phone_speaker_loss_db']} dB  bass ~{p['bass_fundamental_hz']} Hz, harmonics {p['bass_harmonics_db']} dB")
@@ -651,7 +709,7 @@ def write_png(a: dict, path: Path) -> None:
     ax1.set_title(
         f"{Path(a['source']).name} -- {a['genre']}, "
         + (f"{t['bpm']} BPM" if t["has_grid"] else "no grid")
-        + f", {a['key']['name']} ({a['key']['camelot']}), {a['loudness']['integrated_lufs']} LUFS"
+        + f", {key_label(a['key'])}, {a['loudness']['integrated_lufs']} LUFS"
     )
     tl = a["tilt"]
     ax2.bar([str(c) for c in tl["octave_centers_hz"]], tl["octave_levels_db"], color="#5b8def")
@@ -665,12 +723,23 @@ def write_png(a: dict, path: Path) -> None:
     plt.close(fig)
 
 
+def key_arg(value: str) -> str:
+    """argparse type for --key: validates, passes the text through."""
+    try:
+        parse_key(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("input", help="Track or Bluebox mix (WAV or anything ffmpeg reads)")
     p.add_argument("--genre", help="ambient | trap | techno | psytrance (required -- not guessed)")
     p.add_argument("--out-dir", type=Path, help="Output folder (default: <stem>_music/)")
     p.add_argument("--png", action="store_true", help="Also write a one-page analysis PNG (needs matplotlib)")
+    p.add_argument("--key", type=key_arg, help="The song's known key, e.g. 'F dorian' or 'A minor' -- reported "
+                   "instead of the estimate (which stays in the JSON as key.detected)")
     return p
 
 
@@ -685,7 +754,7 @@ def main() -> int:
     out_dir = (args.out_dir or src.parent / f"{src.stem}_music").resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    a = analyze(src, args.genre, recipe)
+    a = analyze(src, args.genre, recipe, key=args.key)
     out = out_dir / "music_analysis.json"
     write_json(out, a)
     print("\n" + "\n".join(summary_lines(a)))

@@ -61,6 +61,7 @@ from music_common import (
     SCRIPT_DIR, die, ffmpeg_to, fmt_time, genre_recipe, load_recipes,
     parse_timestamp, preflight, probe,
 )
+from music_analyze import key_arg, key_label, parse_key
 from pipeline_io import (
     AUDIO_FORMATS, PARENT_STEP_ENV, emit, emit_manifest, emit_plan, enable_progress,
     export_formats, format_path, json_mode, parse_formats, print_json,
@@ -127,7 +128,7 @@ def captions(title: str, artist: str | None, genre: str, recipe: dict, a: dict, 
     if t.get("has_grid"):
         facts.append(f"{t['bpm']:g} BPM")
     if k.get("name"):
-        facts.append(f"{k['name']} ({k['camelot']})")
+        facts.append(key_label(k))
     tags = recipe["hashtags"][:7]  # youtube-mux.md convention: under 8, at the bottom
     by = f" -- {artist}" if artist else ""
     yt = [
@@ -158,6 +159,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--genre", help="ambient | trap | techno | psytrance (required -- not guessed)")
     p.add_argument("--title", help="Track title (video overlay, tags, captions; default: file name)")
     p.add_argument("--artist", help="Artist tag/captions")
+    p.add_argument("--key", type=key_arg, help="The song's known key, e.g. 'F dorian' or 'A minor' -- used in the "
+                   "captions, tags and analysis instead of the estimate (which is often off for modal music)")
     p.add_argument("--outputs", type=parse_outputs, help=f"Comma-separated deliverables: {', '.join(OUTPUTS)}")
     p.add_argument("--formats", type=parse_formats, default=("wav24", "wav16"),
                    help=f"Audio formats for the master output: {', '.join(AUDIO_FORMATS)} (default: wav24,wav16)")
@@ -257,13 +260,15 @@ def main() -> int:
         steps.append(("master", "Preparing the master", None))
         steps.append(("analyze", "Analyzing the master",
                       [py, str(SCRIPT_DIR / "music_analyze.py"), str(master), "--genre", args.genre,
-                       "--out-dir", str(audio)]))
+                       "--out-dir", str(audio)] + ([f"--key={args.key}"] if args.key else [])))
     else:
         cmd = [py, str(SCRIPT_DIR / "process_music_wav.py"), str(src), "--genre", args.genre,
                "--preset", args.preset, f"--title={title}", "--out-dir", str(audio),
                "--formats", ",".join(formats)]
         if args.artist:
             cmd += [f"--artist={args.artist}"]  # one token: a leading "-" can't read as a flag
+        if args.key:
+            cmd += [f"--key={args.key}"]
         if args.start is not None:
             cmd += ["--start", f"{args.start}"]
         if args.end is not None:
@@ -374,6 +379,7 @@ def main() -> int:
         f"source={src}",
         f"genre={args.genre} title={title!r} style={style} {' '.join(vis_extra)}".rstrip(),
         f"outputs={','.join(outputs)}" + (f" formats={','.join(formats)}" if "master" in outputs else ""),
+    ] + ([f"key={key_label(parse_key(args.key))} (given)"] if args.key else []) + [
         f"master={master}",
     ] + ([f"clip={clip} ({probe(clip)['duration']:.2f}s)"] if need_clip else []) \
       + ([f"preview: videos limited to the first {args.max_seconds:g}s"] if args.max_seconds else []) \

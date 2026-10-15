@@ -312,7 +312,12 @@ marked `"untested": true` until it's been A/B'd against real Bluebox mixes.
   reported as "no grid" -- everything downstream then works in seconds.
 - key, in standard and Camelot notation (chroma from C3 up, so a saw
   bass's overtones don't turn minor keys major); a low-confidence key is
-  flagged as a guess
+  flagged as a guess. When you know the key, `--key "F dorian"` (on
+  `release.py`, `process_music_wav.py` or `music_analyze.py`) reports it
+  instead -- captions, tags, REPORT.txt and the JSON, which keeps the
+  estimate under `key.detected`. Modes get their parent key's Camelot
+  number, on the minor (A) or major (B) side by their third: F dorian is
+  Eb major's notes, so 5A; G mixolydian is 8B.
 - loudness (integrated, LRA, true peak, PLR), DC offset, clipped samples
 - stereo checks: correlation below the genre's mono-bass crossover and
   mono-sum loss
