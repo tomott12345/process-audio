@@ -328,6 +328,9 @@ def music_pipeline(deps: dict) -> dict:
         opt("method", "tags", "How it was made (captions)", "text", flag="--method", advanced=True,
             default="Hardware synths, recorded DAWless and mixed live on a 1010music Bluebox.",
             requires_output=["captions"]),
+        opt("key", "tags", "Song key", "text", flag="--key", advanced=True, default="",
+            help="The song's known key, e.g. 'F dorian' or 'A minor' -- used in captions, tags and the "
+                 "analysis instead of the detected key (blank = detect it)"),
     ]
     outputs = [
         {"id": "master", "label": "Mastered audio", "formats": True, "default": True},

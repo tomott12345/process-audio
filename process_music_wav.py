@@ -60,6 +60,7 @@ from music_common import (
     astats, die, ebur128, ffmpeg_to, ffmpeg_version, fmt_time, genre_recipe,
     load_recipes, parse_timestamp, preflight, probe, write_json,
 )
+from music_analyze import key_arg, key_label, parse_key
 from pipeline_io import (
     AUDIO_FORMATS, emit, emit_manifest, emit_output, emit_plan, enable_progress,
     export_formats, json_mode, parse_formats, print_json,
@@ -147,7 +148,7 @@ def tags_for(args, analysis: dict | None, genre: str) -> dict[str, str]:
         if t.get("has_grid"):
             comment.append(f"bpm={t['bpm']:g}")
         if k.get("name"):
-            comment.append(f"key={k['name']} ({k['camelot']})")
+            comment.append(f"key={key_label(k)}")
     return {"genre": genre, "comment": "; ".join(comment), "title": args.title or "", "artist": args.artist or ""}
 
 
@@ -162,6 +163,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--end", type=parse_timestamp, help="Seconds, or mm:ss/hh:mm:ss, to cut off at")
     p.add_argument("--title", help="Title tag (also used by release.py)")
     p.add_argument("--artist", help="Artist tag")
+    p.add_argument("--key", type=key_arg, help="The song's known key, e.g. 'F dorian' -- used for the key tag "
+                   "and the analysis instead of the estimate")
     p.add_argument("--width", type=float, help="Side level above the mono-bass crossover (1.0 = unchanged; overrides the recipe)")
     p.add_argument("--no-mono-bass", action="store_true", help="Skip folding the low end to mono")
     p.add_argument("--no-softclip", action="store_true", help="Skip the soft-clipper even if the genre recipe uses one")
@@ -372,9 +375,11 @@ def main() -> int:
     analysis = None
     if args.analysis:
         analysis = json.loads(args.analysis.read_text())
+        if args.key:
+            analysis["key"] = dict(parse_key(args.key), detected=analysis["key"])
     elif not args.no_analysis:
         from music_analyze import analyze
-        analysis = analyze(cur, args.genre, recipe)
+        analysis = analyze(cur, args.genre, recipe, key=args.key)
         write_json(out_dir / "music_analysis_source.json", analysis)
     meta = tags_for(args, analysis, args.genre)
 
@@ -402,7 +407,7 @@ def main() -> int:
     if analysis is not None:
         emit("step_start", step="qc", label="Checking the master")
         from music_analyze import analyze
-        qc = analyze(m24, args.genre, recipe)
+        qc = analyze(m24, args.genre, recipe, key=args.key)
         write_json(out_dir / "music_analysis.json", qc)
         s0, s1 = analysis["stereo"], qc["stereo"]
         report.append(
@@ -410,7 +415,7 @@ def main() -> int:
             f"phone loss: {analysis['phone']['phone_speaker_loss_db']} -> {qc['phone']['phone_speaker_loss_db']} dB"
         )
         if qc["tempo"].get("has_grid"):
-            report.append(f"tags: {qc['tempo']['bpm']:g} BPM, {qc['key']['name']} ({qc['key']['camelot']})")
+            report.append(f"tags: {qc['tempo']['bpm']:g} BPM, {key_label(qc['key'])}")
         for f in qc["flags"]:
             report.append(f"flag: {f}")
         emit_output("analysis", out_dir / "music_analysis.json", "json")

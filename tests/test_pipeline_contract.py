@@ -103,7 +103,7 @@ def sample_value(o, type_id):
     if k == "text":
         if o.get("flag_empty") and d:
             return ""  # clearing a non-empty default is the interesting case
-        return "⭐" if o["id"] == "emoji" else "Test Value"
+        return {"emoji": "⭐", "key": "F dorian"}.get(o["id"], "Test Value")
     raise AssertionError(k)
 
 
